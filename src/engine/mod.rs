@@ -1,4 +1,6 @@
 pub mod fake;
+#[cfg(feature = "engine-transcribe")]
+pub mod transcribe_cpp;
 
 #[derive(thiserror::Error, Debug)]
 pub enum EngineError {
