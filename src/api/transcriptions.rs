@@ -5,7 +5,6 @@
 //! json). Unknown extra fields are ignored, like the OpenAI API does.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::extract::multipart::MultipartError;
 use axum::extract::{Multipart, State};
@@ -14,13 +13,10 @@ use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
 use crate::api::error::ApiError;
+use crate::api::exec::transcribe_range;
 use crate::audio::{TARGET_SR, decode_to_pcm_16k};
 use crate::chunk::chunk_ranges;
-use crate::engine::EngineError;
 use crate::server::AppState;
-
-/// How long a request may wait for a free engine slot before 503.
-const QUEUE_TIMEOUT: Duration = Duration::from_secs(60);
 
 enum ResponseFormat {
     Json,
@@ -80,21 +76,14 @@ pub async fn transcribe(
     let pcm = Arc::new(pcm);
     let mut parts: Vec<String> = Vec::with_capacity(ranges.len());
     for range in ranges {
-        let permit = tokio::time::timeout(QUEUE_TIMEOUT, state.sem.acquire())
-            .await
-            .map_err(|_| ApiError::busy())?
-            .map_err(|e| ApiError::internal(format!("semaphore closed: {e}")))?;
-        let engine = Arc::clone(&state.engine);
-        let pcm = Arc::clone(&pcm);
-        let model = model.clone();
-        let language = language.clone();
-        let text = tokio::task::spawn_blocking(move || {
-            engine.transcribe(&pcm[range], model.as_deref(), language.as_deref())
-        })
-        .await
-        .map_err(|e| ApiError::internal(format!("transcription task failed: {e}")))?
-        .map_err(engine_error)?;
-        drop(permit);
+        let text = transcribe_range(
+            &state,
+            Arc::clone(&pcm),
+            range,
+            model.clone(),
+            language.clone(),
+        )
+        .await?;
         parts.push(text);
     }
     let text = parts.join(" ").trim().to_string();
@@ -118,12 +107,5 @@ fn multipart_error(err: MultipartError, limit_mb: usize) -> ApiError {
         ApiError::too_large(limit_mb)
     } else {
         ApiError::bad_request(format!("invalid multipart body: {}", err.body_text()))
-    }
-}
-
-fn engine_error(err: EngineError) -> ApiError {
-    match err {
-        EngineError::UnknownModel(_) => ApiError::bad_request(err.to_string()),
-        EngineError::Failed(_) => ApiError::internal(err.to_string()),
     }
 }
