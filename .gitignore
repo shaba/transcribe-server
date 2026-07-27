@@ -1,2 +1,4 @@
 /target
 tests/fixtures/*.tmp
+/.claude/
+/.mcp.json

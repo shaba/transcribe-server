@@ -1,6 +1,7 @@
 mod api;
 mod audio;
 mod auth;
+mod chunk;
 mod config;
 mod engine;
 
