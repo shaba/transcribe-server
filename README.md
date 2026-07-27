@@ -109,7 +109,7 @@ open. With no keys configured, authentication is disabled entirely
 Errors use the OpenAI JSON shape:
 
 ```json
-{"error": {"message": "...", "type": "invalid_request_error", "code": null}}
+{"error": {"message": "...", "type": "invalid_request_error"}}
 ```
 
 ### POST /v1/audio/transcriptions
@@ -194,7 +194,12 @@ containerized Open WebUI needs the host gateway mapping
 
 ## Deployment (systemd)
 
-Host deployment in the same style as llama-server. Files in `packaging/`:
+Host deployment in the same style as llama-server. Files in `packaging/`.
+The unit is hardened: it runs as a dynamic unprivileged user
+(`DynamicUser=yes`, `NoNewPrivileges=true`, `ProtectSystem=strict`), so model
+files under `/var/lib/transcribe/models` must be readable by that user
+(world-readable models are fine). The api-keys file stays root-owned `0640`:
+systemd hands the service a copy via `LoadCredential`.
 
 ```sh
 # 1. Build and install the binary
