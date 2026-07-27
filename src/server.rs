@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::middleware;
-use axum::routing::get;
+use axum::routing::{get, post};
 
 use crate::auth::{AuthKeys, require_api_key};
 use crate::config::Config;
@@ -29,6 +29,10 @@ impl AppState {
 pub fn build_router(state: AppState, keys: AuthKeys) -> Router {
     let v1 = Router::new()
         .route("/v1/models", get(crate::api::models::list_models))
+        .route(
+            "/v1/audio/transcriptions",
+            post(crate::api::transcriptions::transcribe),
+        )
         .layer(middleware::from_fn_with_state(keys, require_api_key));
     Router::new()
         .route("/health", get(crate::api::health::health))
