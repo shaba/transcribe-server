@@ -22,7 +22,12 @@ pub struct Config {
     pub threads: Option<usize>,
 
     /// Max number of transcriptions processed in parallel
-    #[arg(long, default_value_t = 1, env = "TRANSCRIBE_PARALLEL")]
+    #[arg(
+        long,
+        default_value_t = 1,
+        env = "TRANSCRIBE_PARALLEL",
+        value_parser = at_least_one
+    )]
     pub parallel: usize,
 
     /// API key required in the Authorization header (repeatable)
@@ -38,7 +43,12 @@ pub struct Config {
     pub language: Option<String>,
 
     /// Max chunk length in seconds for long-form audio
-    #[arg(long, default_value_t = 25.0, env = "TRANSCRIBE_CHUNK_MAX_SEC")]
+    #[arg(
+        long,
+        default_value_t = 25.0,
+        env = "TRANSCRIBE_CHUNK_MAX_SEC",
+        value_parser = positive_f32
+    )]
     pub chunk_max_sec: f32,
 
     /// Energy VAD threshold for chunk splitting
@@ -61,6 +71,24 @@ pub struct Config {
     /// Verbose logging
     #[arg(short = 'v', long, env = "TRANSCRIBE_VERBOSE")]
     pub verbose: bool,
+}
+
+fn at_least_one(s: &str) -> Result<usize, String> {
+    let v: usize = s.parse().map_err(|_| format!("invalid number: {s}"))?;
+    if v >= 1 {
+        Ok(v)
+    } else {
+        Err("must be at least 1".to_string())
+    }
+}
+
+fn positive_f32(s: &str) -> Result<f32, String> {
+    let v: f32 = s.parse().map_err(|_| format!("invalid number: {s}"))?;
+    if v > 0.0 {
+        Ok(v)
+    } else {
+        Err("must be greater than 0".to_string())
+    }
 }
 
 /// A model to load: user-facing alias plus path to the model file.
@@ -134,6 +162,23 @@ mod tests {
         assert!(cfg.language.is_none());
         assert!(!cfg.no_gpu);
         assert!(!cfg.verbose);
+    }
+
+    #[test]
+    fn parallel_zero_is_rejected() {
+        let err = Config::try_parse_from(["ts", "--parallel", "0"]).unwrap_err();
+        assert!(err.to_string().contains("must be at least 1"), "{err}");
+        assert!(Config::try_parse_from(["ts", "--parallel", "1"]).is_ok());
+    }
+
+    #[test]
+    fn chunk_max_sec_must_be_positive() {
+        for bad in ["0", "-1.5", "nan"] {
+            let arg = format!("--chunk-max-sec={bad}");
+            let err = Config::try_parse_from(["ts", &arg]).unwrap_err();
+            assert!(err.to_string().contains("must be greater than 0"), "{err}");
+        }
+        assert!(Config::try_parse_from(["ts", "--chunk-max-sec", "0.5"]).is_ok());
     }
 
     #[test]

@@ -11,7 +11,7 @@
 //! Binary frames are only valid after start and must contain a whole
 //! number of PCM16LE samples: a dangling odd byte is a protocol error.
 //! The final text is every partial text plus the remainder joined with
-//! a single space.
+//! a single space; empty chunk transcripts are skipped.
 
 use std::sync::Arc;
 
@@ -130,7 +130,7 @@ async fn run_session(socket: &mut WebSocket, state: &AppState) -> SessionEnd {
             Err(end) => return end,
         }
     }
-    let frame = json!({"type": "final", "text": parts.join(" ").trim()}).to_string();
+    let frame = json!({"type": "final", "text": crate::api::join_parts(&parts)}).to_string();
     if socket.send(Message::Text(frame.into())).await.is_err() {
         return SessionEnd::Disconnected;
     }

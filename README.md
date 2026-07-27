@@ -156,7 +156,8 @@ Binary frames are only valid after `start` and must contain a whole number of
 PCM16LE samples: a dangling odd byte is a protocol error. Partials are
 emitted whenever a full chunk window (`--chunk-max-sec`) is buffered, cut at
 a VAD-detected silence when there is one. The final text is every partial
-text plus the remainder joined with a single space.
+text plus the remainder joined with a single space (empty chunk transcripts
+are skipped).
 
 ### GET /v1/models
 

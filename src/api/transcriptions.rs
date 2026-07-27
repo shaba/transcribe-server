@@ -63,7 +63,12 @@ pub async fn transcribe(
         }
     };
     let file = file.ok_or_else(|| ApiError::bad_request("missing required field: file"))?;
-    let pcm = decode_to_pcm_16k(&file).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    // Decoding (tempfile + libav) is CPU/IO-bound: keep it off the async
+    // runtime threads.
+    let pcm = tokio::task::spawn_blocking(move || decode_to_pcm_16k(&file))
+        .await
+        .map_err(|e| ApiError::internal(format!("decode task failed: {e}")))?
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
     let language = language.or_else(|| state.cfg.language.clone());
 
     let ranges = chunk_ranges(
@@ -86,7 +91,7 @@ pub async fn transcribe(
         .await?;
         parts.push(text);
     }
-    let text = parts.join(" ").trim().to_string();
+    let text = crate::api::join_parts(&parts);
 
     Ok(match format {
         ResponseFormat::Json => axum::Json(json!({ "text": text })).into_response(),

@@ -102,6 +102,9 @@ fn build_engine(cfg: &Config) -> Result<Arc<dyn SttEngine>, String> {
 }
 
 async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+    if let Err(e) = tokio::signal::ctrl_c().await {
+        tracing::error!("failed to install shutdown signal handler: {e}");
+        return;
+    }
     tracing::info!("shutdown signal received, draining connections");
 }
