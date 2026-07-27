@@ -64,15 +64,12 @@ pub struct Config {
 }
 
 /// A model to load: user-facing alias plus path to the model file.
-// TODO(server tasks): drop allow(dead_code) once the server consumes these.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ModelSpec {
     pub alias: String,
     pub path: PathBuf,
 }
 
-#[allow(dead_code)]
 impl Config {
     /// Parse `--model` values: "alias=path" keeps the alias,
     /// a bare "path" uses the file stem as the alias.

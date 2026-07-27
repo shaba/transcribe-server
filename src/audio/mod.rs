@@ -16,8 +16,6 @@ pub enum AudioError {
 }
 
 /// Any container/codec -> 16 kHz mono f32 [-1,1].
-// TODO(server tasks): drop allow(dead_code) once the transcription handler consumes this.
-#[allow(dead_code)]
 pub fn decode_to_pcm_16k(data: &[u8]) -> Result<Vec<f32>, AudioError> {
     if let Some(pcm) = wav_fastpath(data) {
         return Ok(pcm);

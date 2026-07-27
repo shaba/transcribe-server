@@ -1,7 +1,5 @@
 use super::{EngineError, SttEngine};
 
-// TODO(server tasks): drop allow(dead_code) once handlers consume the engine.
-#[allow(dead_code)]
 pub struct FakeEngine;
 
 impl SttEngine for FakeEngine {

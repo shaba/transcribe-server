@@ -1,14 +1,8 @@
-mod api;
-mod audio;
-mod auth;
-mod chunk;
-mod config;
-mod engine;
-
 use clap::Parser;
+use transcribe_server::config::Config;
 
 fn main() {
-    let cfg = config::Config::parse();
+    let cfg = Config::parse();
     if cfg.verbose {
         println!("{cfg:#?}");
     }

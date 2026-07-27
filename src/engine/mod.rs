@@ -1,7 +1,5 @@
 pub mod fake;
 
-// TODO(server tasks): drop allow(dead_code) once handlers consume the engine.
-#[allow(dead_code)]
 #[derive(thiserror::Error, Debug)]
 pub enum EngineError {
     #[error("unknown model: {0}")]
@@ -10,7 +8,6 @@ pub enum EngineError {
     Failed(String),
 }
 
-#[allow(dead_code)]
 pub trait SttEngine: Send + Sync {
     /// pcm: 16 kHz mono f32 [-1,1]; model: request alias or None (default model)
     fn transcribe(

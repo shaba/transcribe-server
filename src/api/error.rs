@@ -9,8 +9,6 @@ pub struct ApiError {
     pub error_type: &'static str,
 }
 
-// TODO(server tasks): drop allow(dead_code) once handlers consume these.
-#[allow(dead_code)]
 impl ApiError {
     pub fn bad_request(msg: impl Into<String>) -> Self {
         Self {

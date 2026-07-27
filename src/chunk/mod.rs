@@ -24,8 +24,6 @@ const FRAME_MS: usize = 30;
 /// Edge cases: empty pcm -> empty vec; `max_sec` values shorter than one
 /// frame are clamped up to one frame so every range is non-empty and the
 /// loop always makes progress.
-// TODO(tasks 9-10): drop allow(dead_code) once transcription handlers chunk audio.
-#[allow(dead_code)]
 pub fn chunk_ranges(
     pcm: &[f32],
     sample_rate: usize,

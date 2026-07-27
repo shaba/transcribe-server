@@ -4,8 +4,6 @@
 #[derive(Clone, Default)]
 pub struct AuthKeys(pub std::sync::Arc<std::collections::HashSet<String>>);
 
-// TODO(task 8): drop allow(dead_code) once build_router layers this middleware.
-#[allow(dead_code)]
 pub async fn require_api_key(
     axum::extract::State(keys): axum::extract::State<AuthKeys>,
     req: axum::extract::Request,
