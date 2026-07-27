@@ -1,4 +1,5 @@
 mod api;
+mod audio;
 mod auth;
 mod config;
 mod engine;
