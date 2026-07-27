@@ -2,6 +2,7 @@
 name = "transcribe-server"
 version = "0.0.1"
 edition = "2024"
+rust-version = "1.93"
 license = "MIT"
 description = "OpenAI-compatible speech-to-text server on top of transcribe.cpp"
 

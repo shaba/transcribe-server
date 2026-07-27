@@ -1,0 +1,11 @@
+[Unit]
+Description=transcribe-server (OpenAI-compatible STT)
+After=network.target
+
+[Service]
+EnvironmentFile=-/etc/transcribe/transcribe-server.env
+ExecStart=/usr/bin/transcribe-server -m ${TRANSCRIBE_MODEL} --host ${TRANSCRIBE_HOST} --port ${TRANSCRIBE_PORT} --api-key-file /etc/transcribe/api-keys
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
