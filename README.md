@@ -42,15 +42,24 @@ Real engine build:
 cargo build --release --features engine-transcribe
 ```
 
-The `engine-transcribe` feature pulls in the `transcribe-cpp` crate, whose
-`transcribe-cpp-sys` builds the bundled transcribe.cpp C++ library from
-source via CMake. That means you additionally need `cmake` and a C++
-toolchain (`g++`/`clang++`); the first build compiles ggml and is slow. There
-is currently no system-library linking mode in the sys crate (0.1.x) — the
-library is always built from the bundled sources. Extra CMake options can be
-passed through the `TRANSCRIBE_CMAKE_ARGS` environment variable as an escape
-hatch. Linking against a system/prebuilt libtranscribe is a possible future
-improvement.
+The `engine-transcribe` feature pulls in the `transcribe-cpp` crate (safe
+wrapper) and its `transcribe-cpp-sys` crate (FFI plus the native build).
+Where the native transcribe.cpp library comes from is chosen by one of three
+linking modes.
+
+### Linking modes
+
+#### Mode 1 — crates.io (default)
+
+```sh
+cargo build --release --features engine-transcribe
+```
+
+`transcribe-cpp-sys` from crates.io compiles the vendored transcribe.cpp C++
+tree via CMake. You additionally need `cmake` and a C++ toolchain
+(`g++`/`clang++`); the first build compiles ggml and is slow. Extra CMake
+options can be forwarded through the `TRANSCRIBE_CMAKE_ARGS` environment
+variable as an escape hatch.
 
 CUDA build (GPU inference):
 
@@ -60,6 +69,76 @@ cargo build --release --features engine-transcribe,transcribe-cpp/cuda
 
 This requires the CUDA toolkit at build time. At runtime the backend is
 auto-selected; `--no-gpu` forces CPU.
+
+#### Mode 2 — patched/bundled checkout (`[patch.crates-io]`)
+
+The same source build as mode 1, but the crates come from a git or local
+checkout of transcribe.cpp instead of crates.io. Use this to pick up
+unreleased upstream fixes — for example `TRANSCRIBE_DIR` support (mode 3)
+until it lands in a crates.io release. Uncomment and adapt the example block
+at the bottom of `Cargo.toml`:
+
+```toml
+[patch.crates-io]
+transcribe-cpp = { git = "https://github.com/handy-computer/transcribe.cpp", rev = "<commit>" }
+transcribe-cpp-sys = { git = "https://github.com/handy-computer/transcribe.cpp", rev = "<commit>" }
+```
+
+or point at a local checkout (mind the upstream layout: the
+`transcribe-cpp-sys` manifest sits at the transcribe.cpp repo root, the safe
+wrapper lives in `bindings/rust/transcribe-cpp`):
+
+```toml
+[patch.crates-io]
+transcribe-cpp = { path = "/path/to/transcribe.cpp/bindings/rust/transcribe-cpp" }
+transcribe-cpp-sys = { path = "/path/to/transcribe.cpp" }
+```
+
+A patch only applies when the patched version satisfies the `[dependencies]`
+requirement. The current upstream checkout is 0.2.0 while this project
+requires `^0.1.3`, so also bump the requirement to
+`transcribe-cpp = { version = "0.2.0", optional = true }` — otherwise cargo
+warns `patch ... was not used in the crate graph` and silently keeps the
+crates.io version. The server compiles against the 0.2.0 wrapper unmodified.
+
+#### Mode 3 — system/prebuilt prefix (`TRANSCRIBE_DIR`)
+
+Skip the vendored source build entirely and link an existing transcribe.cpp
+install prefix (OPENSSL_DIR-style). Produce the prefix once from a
+transcribe.cpp checkout:
+
+```sh
+cmake -B build -DTRANSCRIBE_INSTALL=ON -DTRANSCRIBE_BUILD_SHARED=ON
+cmake --build build -j
+cmake --install build --prefix /opt/transcribe
+```
+
+then build the server against it:
+
+```sh
+TRANSCRIBE_DIR=/opt/transcribe cargo build --release --features engine-transcribe
+```
+
+Notes:
+
+- The prefix must contain the installed `lib*/transcribe-link.json` manifest;
+  any `cmake --install` of a `TRANSCRIBE_INSTALL=ON` build provides it. The
+  link line is reconstructed from the manifest, so static and shared prefixes
+  both work.
+- Build features (`transcribe-cpp/cuda`, `transcribe-cpp/vulkan`, ...) are
+  inert in this mode: the prebuilt library already fixed its configuration
+  (backends, static vs shared) and the manifest records it. Choose backends
+  when configuring the prefix build instead (e.g. `-DGGML_CUDA=ON`).
+- Shared prefixes (`TRANSCRIBE_BUILD_SHARED=ON`) need the prefix lib dir on
+  the loader path at runtime, e.g. `LD_LIBRARY_PATH=/opt/transcribe/lib64`
+  (or `lib`, depending on the platform). For systemd deployments uncomment
+  the `Environment=LD_LIBRARY_PATH=...` line in
+  `packaging/transcribe-server.service`. Static prefixes (the upstream
+  default) need nothing at runtime.
+- `TRANSCRIBE_DIR` support is not in the crates.io release yet
+  (`transcribe-cpp-sys` 0.1.3 predates it): until upstream releases it, mode
+  3 additionally requires the mode 2 patch pointing at a checkout that
+  contains it (upstream branch `rust-sys-system-prefix`).
 
 ## Running
 

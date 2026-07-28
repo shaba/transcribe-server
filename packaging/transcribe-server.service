@@ -12,6 +12,9 @@ EnvironmentFile=-/etc/transcribe/transcribe-server.env
 # api-keys stays root-owned 0640: systemd reads it and exposes a copy to the
 # service in the credentials directory (%d).
 LoadCredential=api-keys:/etc/transcribe/api-keys
+# Linking mode 3 (TRANSCRIBE_DIR) with a shared prefix: the binary needs the
+# prefix lib dir on the loader path (see README "Linking modes").
+#Environment=LD_LIBRARY_PATH=/opt/transcribe/lib64
 ExecStart=/usr/bin/transcribe-server -m ${TRANSCRIBE_MODEL} --host ${TRANSCRIBE_HOST} --port ${TRANSCRIBE_PORT} --api-key-file %d/api-keys
 Restart=on-failure
 

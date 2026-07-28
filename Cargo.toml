@@ -30,3 +30,14 @@ futures-util = "0.3.33"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "multipart", "stream", "rustls"] }
 tokio-tungstenite = "0.30.0"
 tower = { version = "0.5.3", features = ["util"] }
+
+# Linking mode 2 (see README "Linking modes"): build against a patched
+# transcribe.cpp checkout instead of crates.io. The patch only applies when the
+# patched version satisfies the transcribe-cpp requirement above, so bump that
+# requirement if the checkout is newer. Git variant:
+# [patch.crates-io]
+# transcribe-cpp = { git = "https://github.com/handy-computer/transcribe.cpp", rev = "<commit>" }
+# transcribe-cpp-sys = { git = "https://github.com/handy-computer/transcribe.cpp", rev = "<commit>" }
+# Local-path variant (the -sys manifest sits at the transcribe.cpp repo root):
+# transcribe-cpp = { path = "/path/to/transcribe.cpp/bindings/rust/transcribe-cpp" }
+# transcribe-cpp-sys = { path = "/path/to/transcribe.cpp" }
