@@ -1,0 +1,64 @@
+# Kept in sync with .github/workflows/ci.yaml: same jobs, same steps, same
+# order. Only the runner label and the system package names differ.
+# Jobs run in an ALT container, so apt-get (apt-rpm) is used without sudo.
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: als-huge
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system deps
+        run: |
+          apt-get update
+          apt-get install -y rust rust-cargo clippy rustfmt gcc-c++ make \
+            libavformat-devel libavcodec-devel libavutil-devel \
+            libswresample-devel pkg-config cmake
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-test-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-test-
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo check --no-default-features
+
+  # Separate job: engine-transcribe builds the vendored C++ (cmake + g++),
+  # which takes several minutes and shares nothing with the default-feature
+  # build cache.
+  engine:
+    runs-on: als-huge
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system deps
+        run: |
+          apt-get update
+          apt-get install -y rust rust-cargo clippy rustfmt gcc-c++ make \
+            libavformat-devel libavcodec-devel libavutil-devel \
+            libswresample-devel pkg-config cmake
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-engine-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-engine-
+      - run: cargo clippy --features engine-transcribe --all-targets -- -D warnings

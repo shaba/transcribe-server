@@ -1,0 +1,39 @@
+# Kept in sync with .github/workflows/release.yaml: a tag push creates a
+# release with notes only. No binaries and no source tarballs are uploaded;
+# the forge attaches the source archives itself.
+#
+# Two deliberate differences from the GitHub file:
+# - Forgejo matches tag filters with glob semantics (no "+" quantifier), so the
+#   semver pattern is spelled with "*".
+# - There is no auto-generated release notes feature, so the body is a fixed
+#   pointer to the commit history.
+name: release
+
+on:
+  push:
+    tags:
+      - "v[0-9]*.[0-9]*.[0-9]*"
+
+jobs:
+  release:
+    runs-on: als-huge
+    steps:
+      # No checkout: nothing from the tree is needed, the release is created
+      # through the API.
+      - name: Install system deps
+        run: |
+          apt-get update
+          apt-get install -y curl
+      - name: Create release
+        env:
+          FORGE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          printf '{"tag_name":"%s","name":"%s","body":"%s"}\n' \
+            "$TAG" "$TAG" "See the commit history for the changes in this release." \
+            > release.json
+          curl -fsS -X POST \
+            -H "Authorization: token $FORGE_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d @release.json \
+            "${{ github.server_url }}/api/v1/repos/${{ github.repository }}/releases"

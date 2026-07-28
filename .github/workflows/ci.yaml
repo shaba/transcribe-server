@@ -1,0 +1,61 @@
+# Kept in sync with .forgejo/workflows/ci.yaml: same jobs, same steps, same
+# order. Only the runner label and the system package names differ.
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libavformat-dev libavcodec-dev libavutil-dev \
+            libswresample-dev pkg-config cmake
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-test-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-test-
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo check --no-default-features
+
+  # Separate job: engine-transcribe builds the vendored C++ (cmake + g++),
+  # which takes several minutes and shares nothing with the default-feature
+  # build cache.
+  engine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libavformat-dev libavcodec-dev libavutil-dev \
+            libswresample-dev pkg-config cmake
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-engine-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-engine-
+      - run: cargo clippy --features engine-transcribe --all-targets -- -D warnings
