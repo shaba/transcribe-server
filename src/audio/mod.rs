@@ -90,9 +90,24 @@ fn decode_via_ffmpeg(data: &[u8]) -> Result<Vec<f32>, AudioError> {
         |decoder: &mut ff::decoder::Audio, pcm: &mut Vec<f32>| -> Result<(), AudioError> {
             let mut frame = ff::frame::Audio::empty();
             while decoder.receive_frame(&mut frame).is_ok() {
+                // swresample needs a concrete channel layout, and PCM in RIFF/WAV
+                // carries no channel mask, so libavcodec hands out frames with an
+                // unspecified layout that has to be stamped with the default one
+                // for the channel count. That count must come from the frame (or
+                // the decoder), never from the unspecified layout itself: on
+                // FFmpeg < 7.0 ffmpeg-next maps ChannelLayout onto the legacy
+                // AVFrame.channel_layout bitmask, where "unspecified" is 0 and so
+                // reports 0 channels; the default layout for 0 is empty again and
+                // swr_init then fails with EINVAL. FFmpeg >= 7.0 keeps the channel
+                // count in the layout even when unspecified, which is why this only
+                // broke against 6.x system libs.
                 if frame.channel_layout().is_empty() {
-                    let n = frame.channel_layout().channels();
-                    frame.set_channel_layout(ff::channel_layout::ChannelLayout::default(n));
+                    let n = match frame.channels() {
+                        0 => decoder.channels(),
+                        n => n,
+                    };
+                    let layout = ff::channel_layout::ChannelLayout::default(i32::from(n));
+                    frame.set_channel_layout(layout);
                 }
                 let resampler = match resampler.as_mut() {
                     Some(r) => r,
