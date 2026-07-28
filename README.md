@@ -75,8 +75,9 @@ auto-selected; `--no-gpu` forces CPU.
 The same source build as mode 1, but the crates come from a git or local
 checkout of transcribe.cpp instead of crates.io. Use this to pick up
 unreleased upstream fixes — for example `TRANSCRIBE_DIR` support (mode 3)
-until it lands in a crates.io release. Uncomment and adapt the example block
-at the bottom of `Cargo.toml`:
+until it lands in a crates.io release. Uncomment and adapt ONE of the two
+variants from the example block at the bottom of `Cargo.toml` (uncommenting
+both is invalid TOML — duplicate keys):
 
 ```toml
 [patch.crates-io]
