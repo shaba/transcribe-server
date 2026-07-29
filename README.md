@@ -279,7 +279,9 @@ Host deployment in the same style as llama-server. Files in `packaging/`.
 The unit is a systemd template (`transcribe-server@.service`): every instance
 `<name>` is configured by `/etc/transcribe/<name>.env`, so several models can
 run side by side on different ports. The env files are not shipped by the
-packages — the administrator creates them.
+packages — the administrator creates them, starting from the commented
+`packaging/gigaam.env.example` (the ALT package installs it as documentation
+under `/usr/share/doc/transcribe-server`).
 
 The unit is hardened: it runs as a dynamic unprivileged user
 (`DynamicUser=yes`, `NoNewPrivileges=true`, `ProtectSystem=strict`), so model
