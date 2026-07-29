@@ -288,11 +288,15 @@ files under `/var/lib/transcribe/models` must be readable by that user
 
 API keys are optional. `/etc/transcribe/<name>.api-keys` (one key per line)
 stays root-owned `0640` and systemd hands the service a copy via
-`LoadCredential=`; the unit also carries an empty `SetCredential=api-keys:`,
-which systemd uses as the fallback when that file does not exist. So an
-instance without a key file starts fine and serves anonymously — the default
-`127.0.0.1` bind. Adding or removing the file only needs a restart of the
-instance.
+`LoadCredential=`; the unit also carries `SetCredential=api-keys:\n`, which
+systemd uses as the fallback when that file does not exist. So an instance
+without a key file starts fine and serves anonymously — the default `127.0.0.1`
+bind. Adding or removing the file only needs a restart of the instance.
+
+The fallback value is a single newline rather than nothing on purpose: systemd
+ignores a `SetCredential=` with an empty value outright, and the instance then
+fails to start with `status=243/CREDENTIALS` when the key file is absent. A
+newline is skipped by the key parser, so it configures no key.
 
 ```sh
 # 1. Build and install the binary
