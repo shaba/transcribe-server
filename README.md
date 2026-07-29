@@ -277,15 +277,22 @@ containerized Open WebUI needs the host gateway mapping
 
 Host deployment in the same style as llama-server. Files in `packaging/`.
 The unit is a systemd template (`transcribe-server@.service`): every instance
-`<name>` is configured by `/etc/transcribe/<name>.env` and
-`/etc/transcribe/<name>.api-keys`, so several models can run side by side on
-different ports.
+`<name>` is configured by `/etc/transcribe/<name>.env`, so several models can
+run side by side on different ports. The env files are not shipped by the
+packages — the administrator creates them.
 
 The unit is hardened: it runs as a dynamic unprivileged user
 (`DynamicUser=yes`, `NoNewPrivileges=true`, `ProtectSystem=strict`), so model
 files under `/var/lib/transcribe/models` must be readable by that user
-(world-readable models are fine). The api-keys file stays root-owned `0640`:
-systemd hands the service a copy via `LoadCredential`.
+(world-readable models are fine).
+
+API keys are optional. `/etc/transcribe/<name>.api-keys` (one key per line)
+stays root-owned `0640` and systemd hands the service a copy via
+`LoadCredential=`; the unit also carries an empty `SetCredential=api-keys:`,
+which systemd uses as the fallback when that file does not exist. So an
+instance without a key file starts fine and serves anonymously — the default
+`127.0.0.1` bind. Adding or removing the file only needs a restart of the
+instance.
 
 ```sh
 # 1. Build and install the binary
@@ -296,19 +303,21 @@ install -m 755 target/release/transcribe-server /usr/bin/transcribe-server
 install -m 644 packaging/transcribe-server@.service /etc/systemd/system/
 systemctl daemon-reload
 
-# 3. Per-instance config: environment file and API keys
+# 3. Per-instance config: environment file
 mkdir -p /etc/transcribe /var/lib/transcribe/models
 install -m 640 packaging/gigaam.env.example /etc/transcribe/gigaam.env
 # edit /etc/transcribe/gigaam.env (model path, host, port)
-touch /etc/transcribe/gigaam.api-keys && chmod 640 /etc/transcribe/gigaam.api-keys
+
+# 4. Optional: require API keys for this instance (skip for anonymous access)
+install -m 640 /dev/null /etc/transcribe/gigaam.api-keys
 # put one API key per line into /etc/transcribe/gigaam.api-keys
 
-# 4. Start
+# 5. Start
 systemctl enable --now transcribe-server@gigaam
 curl -s http://127.0.0.1:8010/health
 ```
 
-A second instance is just another env/api-keys pair with a different
+A second instance is just another env file with a different
 `TRANSCRIBE_PORT`:
 
 ```sh

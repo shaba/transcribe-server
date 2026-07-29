@@ -12,7 +12,12 @@ ProtectSystem=strict
 # GPU builds need access to the DRM/NVIDIA device nodes.
 SupplementaryGroups=video render
 EnvironmentFile=/etc/transcribe/%i.env
-# Per-instance key file stays root-owned 0640; systemd exposes a copy in %d.
+# Optional per-instance key file: keep it root-owned 0640, systemd exposes a
+# copy in %d. SetCredential= is the fallback used when the file does not exist
+# (LoadCredential= alone would make systemd refuse to start the instance): the
+# credential is then empty, no keys are configured and the server serves
+# anonymously, which matches the default 127.0.0.1 bind.
+SetCredential=api-keys:
 LoadCredential=api-keys:/etc/transcribe/%i.api-keys
 # Shared prefix (linking mode 3): put the prefix lib dir on the loader path.
 #Environment=LD_LIBRARY_PATH=/opt/transcribe/lib64
