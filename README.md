@@ -134,7 +134,7 @@ Notes:
   the loader path at runtime, e.g. `LD_LIBRARY_PATH=/opt/transcribe/lib64`
   (or `lib`, depending on the platform). For systemd deployments uncomment
   the `Environment=LD_LIBRARY_PATH=...` line in
-  `packaging/transcribe-server.service`. Static prefixes (the upstream
+  `packaging/transcribe-server@.service`. Static prefixes (the upstream
   default) need nothing at runtime.
 - `TRANSCRIBE_DIR` support is not in the crates.io release yet
   (`transcribe-cpp-sys` 0.1.3 predates it): until upstream releases it, mode
@@ -276,6 +276,11 @@ containerized Open WebUI needs the host gateway mapping
 ## Deployment (systemd)
 
 Host deployment in the same style as llama-server. Files in `packaging/`.
+The unit is a systemd template (`transcribe-server@.service`): every instance
+`<name>` is configured by `/etc/transcribe/<name>.env` and
+`/etc/transcribe/<name>.api-keys`, so several models can run side by side on
+different ports.
+
 The unit is hardened: it runs as a dynamic unprivileged user
 (`DynamicUser=yes`, `NoNewPrivileges=true`, `ProtectSystem=strict`), so model
 files under `/var/lib/transcribe/models` must be readable by that user
@@ -287,18 +292,28 @@ systemd hands the service a copy via `LoadCredential`.
 cargo build --release --features engine-transcribe
 install -m 755 target/release/transcribe-server /usr/bin/transcribe-server
 
-# 2. Config: environment file and API keys
-mkdir -p /etc/transcribe /var/lib/transcribe/models
-install -m 640 packaging/transcribe-server.env.example /etc/transcribe/transcribe-server.env
-# edit /etc/transcribe/transcribe-server.env (model path, host, port)
-touch /etc/transcribe/api-keys && chmod 640 /etc/transcribe/api-keys
-# put one API key per line into /etc/transcribe/api-keys
-
-# 3. Unit
-install -m 644 packaging/transcribe-server.service /etc/systemd/system/
+# 2. Unit
+install -m 644 packaging/transcribe-server@.service /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now transcribe-server
+
+# 3. Per-instance config: environment file and API keys
+mkdir -p /etc/transcribe /var/lib/transcribe/models
+install -m 640 packaging/gigaam.env.example /etc/transcribe/gigaam.env
+# edit /etc/transcribe/gigaam.env (model path, host, port)
+touch /etc/transcribe/gigaam.api-keys && chmod 640 /etc/transcribe/gigaam.api-keys
+# put one API key per line into /etc/transcribe/gigaam.api-keys
+
+# 4. Start
+systemctl enable --now transcribe-server@gigaam
 curl -s http://127.0.0.1:8010/health
+```
+
+A second instance is just another env/api-keys pair with a different
+`TRANSCRIBE_PORT`:
+
+```sh
+# /etc/transcribe/whisper.env -> TRANSCRIBE_PORT=8011, Whisper model path
+systemctl enable --now transcribe-server@whisper
 ```
 
 ## License

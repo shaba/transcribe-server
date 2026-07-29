@@ -1,0 +1,27 @@
+[Unit]
+Description=transcribe-server (%i)
+After=network.target
+
+[Service]
+Type=exec
+# Dynamic unprivileged user: models under /var/lib/transcribe/models must be
+# readable by it (world-readable model files are fine).
+DynamicUser=yes
+NoNewPrivileges=true
+ProtectSystem=strict
+# GPU builds need access to the DRM/NVIDIA device nodes.
+SupplementaryGroups=video render
+EnvironmentFile=/etc/transcribe/%i.env
+# Per-instance key file stays root-owned 0640; systemd exposes a copy in %d.
+LoadCredential=api-keys:/etc/transcribe/%i.api-keys
+# Shared prefix (linking mode 3): put the prefix lib dir on the loader path.
+#Environment=LD_LIBRARY_PATH=/opt/transcribe/lib64
+ExecStart=/usr/bin/transcribe-server \
+    -m ${TRANSCRIBE_MODEL} \
+    --host ${TRANSCRIBE_HOST} --port ${TRANSCRIBE_PORT} \
+    --api-key-file %d/api-keys
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
