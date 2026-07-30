@@ -21,4 +21,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" --title "$TAG" --generate-notes
+        # A tag can be moved while a version is being prepared, and the second
+        # push must not fail: creating a release for a tag that already has one
+        # is an HTTP 422. Refresh the notes of the existing release instead --
+        # the release itself follows the tag, so it already points at the new
+        # commit.
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TAG" --verify-tag
+          else
+            gh release create "$TAG" --title "$TAG" --generate-notes
+          fi

@@ -28,12 +28,25 @@ jobs:
         env:
           FORGE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
+        # A tag can be moved while a version is being prepared, and the second
+        # push must not fail: POSTing a release for a tag that already has one
+        # is rejected. Patch the existing release in that case -- it follows the
+        # tag, so it already points at the new commit.
         run: |
+          api="${{ github.server_url }}/api/v1/repos/${{ github.repository }}/releases"
           printf '{"tag_name":"%s","name":"%s","body":"%s"}\n' \
             "$TAG" "$TAG" "See the commit history for the changes in this release." \
             > release.json
-          curl -fsS -X POST \
-            -H "Authorization: token $FORGE_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d @release.json \
-            "${{ github.server_url }}/api/v1/repos/${{ github.repository }}/releases"
+          id=$(curl -fsS -H "Authorization: token $FORGE_TOKEN" "$api/tags/$TAG" \
+                 | sed -n 's/.*"id":[[:space:]]*\([0-9]\+\).*/\1/p' | head -1) || id=
+          if [ -n "$id" ]; then
+            curl -fsS -X PATCH \
+              -H "Authorization: token $FORGE_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d @release.json "$api/$id"
+          else
+            curl -fsS -X POST \
+              -H "Authorization: token $FORGE_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d @release.json "$api"
+          fi
