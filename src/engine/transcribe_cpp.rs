@@ -7,10 +7,22 @@
 //! would be wasted work, and with a single model `--parallel > 1` serializes
 //! on the model's compute lock anyway. Real parallelism would need one loaded
 //! model copy per worker; not worth the memory until proven needed.
+//!
+//! Backend modules: when libtranscribe is a dynamic-backend build (the ggml
+//! compute backends are loadable modules rather than compiled in — how the
+//! distro packages ship it), the host MUST register them before the first
+//! model load, or every load fails with `TRANSCRIBE_ERR_BACKEND` and the
+//! library logs "failed to initialize CPU backend". `init_backends_default()`
+//! is the portable way to do that: it is a no-op returning `Ok(())` in a
+//! compiled-in build, and in a dynamic build it loads the modules from the
+//! directory the build pinned (or, failing that, from the directory holding
+//! libtranscribe itself). See [`Self::init_backends`].
 
 use std::sync::Mutex;
 
-use transcribe_cpp::{Backend, Model, ModelOptions, RunOptions, Session, SessionOptions};
+use transcribe_cpp::{
+    Backend, Model, ModelOptions, RunOptions, Session, SessionOptions, init_backends_default,
+};
 
 use crate::config::ModelSpec;
 use crate::engine::{EngineError, SttEngine};
@@ -38,6 +50,8 @@ impl TranscribeCppEngine {
                 "no models configured (use --model)".to_string(),
             ));
         }
+
+        Self::init_backends()?;
 
         let model_options = ModelOptions {
             backend: if no_gpu { Backend::Cpu } else { Backend::Auto },
@@ -74,6 +88,21 @@ impl TranscribeCppEngine {
             });
         }
         Ok(TranscribeCppEngine { models })
+    }
+
+    /// Register the ggml backend modules, once per process, before any model
+    /// load. Idempotent in the library, so calling it again (a second engine,
+    /// a test) is harmless. The error is reported with the device count so a
+    /// misconfigured module directory is obvious from the log line alone.
+    fn init_backends() -> Result<(), EngineError> {
+        init_backends_default().map_err(|e| {
+            EngineError::Failed(format!(
+                "registering ggml backend modules: {e} ({} compute device(s) available); \
+                 a dynamic-backend libtranscribe needs its backend modules installed \
+                 where the build expects them",
+                transcribe_cpp::device_count()
+            ))
+        })
     }
 
     /// Requested alias if known, otherwise the default (first) model.
@@ -144,6 +173,28 @@ mod tests {
             .expect("load must fail for a missing file");
         let msg = err.to_string();
         assert!(msg.contains("missing"), "unexpected error: {msg}");
+    }
+
+    /// A dynamic-backend libtranscribe registers no compute device until the
+    /// host asks for it, and every model load then fails with a bare "backend
+    /// error (status 8)". `load` must do that registration itself: after it
+    /// runs, the process has at least one device. Repeated calls stay fine
+    /// (the library call is idempotent), which is what lets `load` run it
+    /// unconditionally rather than behind a `Once` of its own.
+    #[test]
+    fn load_registers_backend_modules() {
+        // Any load attempt reaches init_backends() — a missing model file
+        // fails later, at model load, not before.
+        let specs = [ModelSpec {
+            alias: "missing".to_string(),
+            path: "/nonexistent/model.gguf".into(),
+        }];
+        let _ = TranscribeCppEngine::load(&specs, true, None);
+        assert!(
+            transcribe_cpp::device_count() > 0,
+            "no compute device registered after load(); backend modules were not loaded"
+        );
+        TranscribeCppEngine::init_backends().expect("init_backends must be idempotent");
     }
 
     /// Real-model smoke test: TS_TEST_MODEL=/path/to/model.gguf cargo test \
