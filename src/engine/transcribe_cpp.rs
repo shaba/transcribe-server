@@ -25,7 +25,7 @@ use transcribe_cpp::{
 };
 
 use crate::config::ModelSpec;
-use crate::engine::{EngineError, SttEngine};
+use crate::engine::{EngineError, SttEngine, TimedSpan, Transcript};
 
 struct LoadedModel {
     alias: String,
@@ -113,14 +113,53 @@ impl TranscribeCppEngine {
     }
 }
 
+/// Map a crate transcript onto the engine-level one: milliseconds relative to
+/// the audio handed to `run` become seconds relative to the same audio.
+///
+/// Only the segment and word rows are carried over. The crate also exposes
+/// token rows (id, per-token confidence `p`, times, owning segment/word), but
+/// the OpenAI verbose_json shape this feeds has nowhere to put them, and `p`
+/// is NaN for families that produce no confidence.
+fn convert(transcript: transcribe_cpp::Transcript) -> Transcript {
+    fn spans(rows: impl IntoIterator<Item = (i64, i64, String)>) -> Vec<TimedSpan> {
+        rows.into_iter()
+            .map(|(t0_ms, t1_ms, text)| TimedSpan {
+                start: t0_ms as f32 / 1000.0,
+                end: t1_ms as f32 / 1000.0,
+                text,
+            })
+            .collect()
+    }
+    Transcript {
+        text: transcript.text,
+        language: transcript.language,
+        segments: spans(
+            transcript
+                .segments
+                .into_iter()
+                .map(|s| (s.t0_ms, s.t1_ms, s.text)),
+        ),
+        words: spans(
+            transcript
+                .words
+                .into_iter()
+                .map(|w| (w.t0_ms, w.t1_ms, w.text)),
+        ),
+    }
+}
+
 impl SttEngine for TranscribeCppEngine {
     fn transcribe(
         &self,
         pcm: &[f32],
         model: Option<&str>,
         language: Option<&str>,
-    ) -> Result<String, EngineError> {
+    ) -> Result<Transcript, EngineError> {
         let entry = self.resolve(model);
+        // RunOptions::default() asks for TimestampKind::Auto, i.e. the richest
+        // granularity the family supports (token-level for GigaAM, segment for
+        // whisper). Which rows actually come back is family-dependent, so the
+        // mapping below copies whatever is populated and never assumes.
         let options = RunOptions {
             language: language.map(str::to_string),
             ..RunOptions::default()
@@ -133,7 +172,7 @@ impl SttEngine for TranscribeCppEngine {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         session
             .run(pcm, &options)
-            .map(|transcript| transcript.text)
+            .map(convert)
             .map_err(|e| EngineError::Failed(format!("model '{}': {e}", entry.alias)))
     }
 
@@ -150,9 +189,67 @@ impl SttEngine for TranscribeCppEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::TranscribeCppEngine;
+    use super::{TranscribeCppEngine, convert};
     use crate::config::ModelSpec;
     use crate::engine::SttEngine;
+
+    #[test]
+    fn convert_maps_milliseconds_to_seconds() {
+        let crate_transcript = transcribe_cpp::Transcript {
+            text: "hello world".to_string(),
+            language: Some("en".to_string()),
+            segments: vec![transcribe_cpp::Segment {
+                t0_ms: 40,
+                t1_ms: 1_240,
+                text: "hello world".to_string(),
+                ..Default::default()
+            }],
+            words: vec![
+                transcribe_cpp::Word {
+                    t0_ms: 40,
+                    t1_ms: 520,
+                    text: "hello".to_string(),
+                    ..Default::default()
+                },
+                transcribe_cpp::Word {
+                    t0_ms: 560,
+                    t1_ms: 1_240,
+                    text: "world".to_string(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let result = convert(crate_transcript);
+        assert_eq!(result.text, "hello world");
+        assert_eq!(result.language.as_deref(), Some("en"));
+        assert_eq!(result.segments.len(), 1);
+        assert_eq!(result.segments[0].start, 0.04);
+        assert_eq!(result.segments[0].end, 1.24);
+        assert_eq!(result.segments[0].text, "hello world");
+        let words: Vec<(f32, f32, &str)> = result
+            .words
+            .iter()
+            .map(|w| (w.start, w.end, w.text.as_str()))
+            .collect();
+        assert_eq!(
+            words,
+            [(0.04, 0.52, "hello"), (0.56, 1.24, "world")],
+            "word rows must keep order and text"
+        );
+    }
+
+    #[test]
+    fn convert_without_timestamp_rows_yields_text_only() {
+        let result = convert(transcribe_cpp::Transcript {
+            text: "no rows".to_string(),
+            ..Default::default()
+        });
+        assert_eq!(result.text, "no rows");
+        assert!(result.segments.is_empty());
+        assert!(result.words.is_empty());
+        assert!(result.language.is_none());
+    }
 
     #[test]
     fn load_without_specs_fails() {
@@ -212,13 +309,20 @@ mod tests {
         assert!(!engine.backend().is_empty());
         // 1 second of silence at 16 kHz; any text (possibly empty) is fine.
         let pcm = vec![0.0f32; 16000];
-        let text = engine
+        let result = engine
             .transcribe(&pcm, Some("test"), None)
             .expect("transcribe silence");
         // Unknown alias falls back to the default (first) model.
-        let text2 = engine
+        let result2 = engine
             .transcribe(&pcm, Some("no-such-alias"), None)
             .expect("transcribe with unknown alias");
-        assert_eq!(text.is_empty(), text2.is_empty());
+        assert_eq!(result.text.is_empty(), result2.text.is_empty());
+        // Timestamp rows, when the family produces them, stay inside the audio.
+        for span in result.segments.iter().chain(result.words.iter()) {
+            assert!(
+                span.start >= 0.0 && span.end <= 1.1 && span.start <= span.end,
+                "row outside the 1 s buffer: {span:?}"
+            );
+        }
     }
 }

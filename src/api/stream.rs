@@ -174,6 +174,8 @@ async fn transcribe(
     language: &Option<String>,
 ) -> Result<String, SessionEnd> {
     let len = chunk.len();
+    // The WS protocol carries text only; the transcript's timestamp rows,
+    // which are relative to this drained chunk, are dropped here.
     crate::api::exec::transcribe_range(
         state,
         Arc::new(chunk),
@@ -182,5 +184,6 @@ async fn transcribe(
         language.clone(),
     )
     .await
+    .map(|transcript| transcript.text)
     .map_err(|e| SessionEnd::Error(e.message))
 }

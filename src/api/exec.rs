@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::api::error::ApiError;
-use crate::engine::EngineError;
+use crate::audio::samples_to_sec;
+use crate::engine::{EngineError, Transcript};
 use crate::server::AppState;
 
 /// How long a request may wait for a free engine slot before 503.
@@ -15,26 +16,34 @@ const QUEUE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Transcribe pcm[range]: acquire a semaphore permit (bounded wait),
 /// then call the engine via spawn_blocking. pcm is shared so callers
 /// can transcribe several ranges without copying samples.
+///
+/// The engine times its rows from the start of the slice it was handed, so
+/// this is where `range.start` is added back: the returned transcript is
+/// timed relative to the start of `pcm`, whatever sub-range was transcribed.
+/// Applying the offset here rather than in the callers keeps it applied
+/// exactly once, on every path.
 pub(crate) async fn transcribe_range(
     state: &AppState,
     pcm: Arc<Vec<f32>>,
     range: Range<usize>,
     model: Option<String>,
     language: Option<String>,
-) -> Result<String, ApiError> {
+) -> Result<Transcript, ApiError> {
+    let offset = samples_to_sec(range.start);
     let permit = tokio::time::timeout(QUEUE_TIMEOUT, state.sem.acquire())
         .await
         .map_err(|_| ApiError::busy())?
         .map_err(|e| ApiError::internal(format!("semaphore closed: {e}")))?;
     let engine = Arc::clone(&state.engine);
-    let text = tokio::task::spawn_blocking(move || {
+    let mut transcript = tokio::task::spawn_blocking(move || {
         engine.transcribe(&pcm[range], model.as_deref(), language.as_deref())
     })
     .await
     .map_err(|e| ApiError::internal(format!("transcription task failed: {e}")))?
     .map_err(engine_error)?;
     drop(permit);
-    Ok(text)
+    transcript.shift(offset);
+    Ok(transcript)
 }
 
 fn engine_error(err: EngineError) -> ApiError {

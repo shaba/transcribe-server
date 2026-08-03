@@ -9,6 +9,13 @@ use std::io::Cursor;
 
 pub const TARGET_SR: usize = 16_000;
 
+/// Sample count -> seconds at the project-wide sample rate. The one place
+/// that conversion happens, so a sample index and a timestamp can never drift
+/// apart by a stray factor.
+pub fn samples_to_sec(samples: usize) -> f32 {
+    samples as f32 / TARGET_SR as f32
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum AudioError {
     #[error("unsupported or corrupt audio: {0}")]
@@ -271,6 +278,14 @@ mod tests {
                 rms(&pcm)
             );
         }
+    }
+
+    #[test]
+    fn samples_to_sec_converts_at_the_target_rate() {
+        assert_eq!(samples_to_sec(0), 0.0);
+        assert_eq!(samples_to_sec(TARGET_SR), 1.0);
+        assert_eq!(samples_to_sec(TARGET_SR / 2), 0.5);
+        assert_eq!(samples_to_sec(TARGET_SR * 3600), 3600.0);
     }
 
     #[test]

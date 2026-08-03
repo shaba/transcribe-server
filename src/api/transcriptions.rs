@@ -89,7 +89,7 @@ pub async fn transcribe(
             language.clone(),
         )
         .await?;
-        parts.push(text);
+        parts.push(text.text);
     }
     let text = crate::api::join_parts(&parts);
 
