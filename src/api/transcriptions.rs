@@ -30,7 +30,11 @@ pub async fn transcribe(
     mut multipart: Multipart,
 ) -> Result<Response, ApiError> {
     let limit_mb = state.cfg.max_upload_mb;
-    let mut file: Option<Vec<u8>> = None;
+    // The upload is buffered whole (both here and, for anything but the WAV
+    // fast path, again as a tempfile in the decoder), so --max-upload-mb
+    // doubles as the memory guard. Bytes rather than Vec<u8> so the buffer
+    // axum already assembled is moved on, not copied a second time.
+    let mut file: Option<axum::body::Bytes> = None;
     let mut model: Option<String> = None;
     let mut language: Option<String> = None;
     let mut response_format: Option<String> = None;
@@ -42,11 +46,12 @@ pub async fn transcribe(
     {
         match field.name().unwrap_or("") {
             "file" => {
-                let bytes = field
-                    .bytes()
-                    .await
-                    .map_err(|e| multipart_error(e, limit_mb))?;
-                file = Some(bytes.to_vec());
+                file = Some(
+                    field
+                        .bytes()
+                        .await
+                        .map_err(|e| multipart_error(e, limit_mb))?,
+                );
             }
             "model" => model = Some(text_field(field, limit_mb).await?),
             "language" => language = Some(text_field(field, limit_mb).await?),

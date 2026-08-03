@@ -56,7 +56,11 @@ pub struct Config {
     pub vad_threshold: f32,
 
     /// Max upload size in megabytes
-    #[arg(long, default_value_t = 64, env = "TRANSCRIBE_MAX_UPLOAD_MB")]
+    // 256 MB is ~2 h of 16 kHz mono 16-bit WAV (an hour is ~110 MB), which is
+    // the bulkiest input a meeting recorder hands over; compressed containers
+    // of the same length are an order of magnitude smaller. The limit is also
+    // the memory guard: a request body is buffered whole (see README).
+    #[arg(long, default_value_t = 256, env = "TRANSCRIBE_MAX_UPLOAD_MB")]
     pub max_upload_mb: usize,
 
     /// Disable GPU inference
@@ -153,7 +157,7 @@ mod tests {
         assert_eq!(cfg.parallel, 1);
         assert_eq!(cfg.chunk_max_sec, 25.0);
         assert_eq!(cfg.vad_threshold, 0.01);
-        assert_eq!(cfg.max_upload_mb, 64);
+        assert_eq!(cfg.max_upload_mb, 256);
         assert_eq!(cfg.engine, "transcribe");
         assert!(cfg.model.is_empty());
         assert!(cfg.threads.is_none());
@@ -162,6 +166,22 @@ mod tests {
         assert!(cfg.language.is_none());
         assert!(!cfg.no_gpu);
         assert!(!cfg.verbose);
+    }
+
+    /// The limit is there to bound memory, but it must not reject the
+    /// workload the server exists for. One hour of the bulkiest input we
+    /// accept -- 16 kHz mono 16-bit WAV, what a conference recorder hands
+    /// over -- is about 110 MiB, so anything at or below that is too small
+    /// to be a sane default.
+    #[test]
+    fn default_upload_limit_covers_an_hour_of_raw_wav() {
+        let hour_mib = 16_000 * 2 * 3600 / (1024 * 1024);
+        let cfg = Config::try_parse_from(["ts"]).unwrap();
+        assert!(
+            cfg.max_upload_mb > hour_mib,
+            "default limit {} MB does not fit an hour of 16 kHz mono WAV ({hour_mib} MB)",
+            cfg.max_upload_mb
+        );
     }
 
     #[test]

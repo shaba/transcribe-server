@@ -170,7 +170,7 @@ Every flag can also be set through its environment variable (flag wins).
 | `--language` | `TRANSCRIBE_LANGUAGE` | auto-detect | Default transcription language |
 | `--chunk-max-sec` | `TRANSCRIBE_CHUNK_MAX_SEC` | `25` | Max chunk length in seconds for long-form audio |
 | `--vad-threshold` | `TRANSCRIBE_VAD_THRESHOLD` | `0.01` | Energy VAD threshold for chunk splitting |
-| `--max-upload-mb` | `TRANSCRIBE_MAX_UPLOAD_MB` | `64` | Max upload size in megabytes |
+| `--max-upload-mb` | `TRANSCRIBE_MAX_UPLOAD_MB` | `256` | Max upload size in megabytes ([why 256](#upload-size-and-memory)) |
 | `--no-gpu` | `TRANSCRIBE_NO_GPU` | off | Disable GPU inference |
 | `--engine` | `TRANSCRIBE_ENGINE` | `transcribe` | Inference engine (`transcribe`, or `fake` for testing) |
 | `-v`, `--verbose` | `TRANSCRIBE_VERBOSE` | off | Verbose (debug) logging |
@@ -258,6 +258,24 @@ curl -s -H "Authorization: Bearer secret" \
   -F file=@meeting.wav -F response_format=verbose_json \
   http://127.0.0.1:8010/v1/audio/transcriptions
 ```
+
+#### Upload size and memory
+
+`--max-upload-mb` defaults to 256. The sizing case is a full meeting or
+lecture recording: one hour of 16 kHz mono 16-bit WAV — what a conference
+recorder such as BigBlueButton hands over — is about 110 MB, so 256 MB covers
+roughly two hours of the bulkiest input the server accepts. The same length in
+a compressed container (opus, mp3, m4a) is an order of magnitude smaller, so
+the limit only ever binds on raw WAV.
+
+The limit is also the memory guard, because the request body is buffered
+whole: the multipart field is collected into one buffer, and everything except
+the 16 kHz mono WAV fast path is then written to a tempfile for libav. Peak
+resident memory per in-flight upload is therefore roughly the body size plus
+the decoded PCM (16 kHz mono f32 = 3.8 MB per minute, ~230 MB per hour). Raise
+the limit only together with the RAM to back it; the alternative — streaming
+the upload straight to a tempfile so the body never has to fit in memory — is
+a TODO, not something the limit currently assumes.
 
 ### WS /v1/audio/stream
 
