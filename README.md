@@ -201,7 +201,7 @@ OpenAI-compatible multipart transcription. Fields:
 | `file` | yes | Audio file (WAV fast path; anything libav can decode: mp3, ogg, webm, m4a, ...) |
 | `model` | no | Model alias; unknown or missing alias falls back to the default (first) model |
 | `language` | no | Language hint (e.g. `ru`); default from `--language`, else auto-detect |
-| `response_format` | no | `json` (default) or `text` |
+| `response_format` | no | `json` (default), `verbose_json` or `text` |
 
 Unknown extra fields (`temperature`, `prompt`, ...) are ignored, like the
 OpenAI API does. Long audio is split into chunks (max `--chunk-max-sec`
@@ -217,6 +217,46 @@ curl -s -H "Authorization: Bearer secret" \
   -F file=@speech.wav -F response_format=text \
   http://127.0.0.1:8010/v1/audio/transcriptions
 # plain text transcript
+```
+
+#### `response_format=verbose_json`
+
+Adds the timestamps the model produced, in the OpenAI `verbose_json` shape:
+
+```json
+{
+  "task": "transcribe",
+  "language": "ru",
+  "duration": 41.28,
+  "text": "...",
+  "segments": [
+    {"id": 0, "start": 0.0, "end": 4.32, "text": "..."},
+    {"id": 1, "start": 4.32, "end": 9.8, "text": "..."}
+  ],
+  "words": [
+    {"word": "...", "start": 0.04, "end": 0.36}
+  ]
+}
+```
+
+- Times are seconds from the start of the **file**, not of the chunk the
+  segment happened to fall into: long audio is transcribed chunk by chunk and
+  each chunk's times are shifted back by that chunk's offset.
+- `duration` is the length of the decoded audio, which can differ slightly
+  from the duration the container advertises.
+- `segments` is always present. Models that report no segment rows of their
+  own get one segment per chunk instead, spanning that chunk.
+- `words` is present only when the model produced word rows. Which
+  granularity a model produces is family-specific: GigaAM aligns down to
+  40 ms, whisper models report segments only. The server asks for the finest
+  granularity the loaded model advertises and passes on whatever comes back.
+- Per-token confidence is available from the library but is not exposed:
+  the OpenAI shape has no field for it.
+
+```sh
+curl -s -H "Authorization: Bearer secret" \
+  -F file=@meeting.wav -F response_format=verbose_json \
+  http://127.0.0.1:8010/v1/audio/transcriptions
 ```
 
 ### WS /v1/audio/stream

@@ -4,6 +4,7 @@ pub mod health;
 pub mod models;
 pub mod stream;
 pub mod transcriptions;
+pub(crate) mod verbose;
 
 /// Join chunk transcripts with single spaces, skipping chunks for which the
 /// engine returned an empty string (so they do not produce double spaces).

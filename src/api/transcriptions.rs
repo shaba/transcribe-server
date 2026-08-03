@@ -1,8 +1,8 @@
 //! POST /v1/audio/transcriptions: OpenAI-compatible multipart transcription.
 //!
 //! This is the Open WebUI dictation contract: multipart fields `file`
-//! (required), `model`, `language`, `response_format` (json|text, default
-//! json). Unknown extra fields are ignored, like the OpenAI API does.
+//! (required), `model`, `language`, `response_format` (json|verbose_json|text,
+//! default json). Unknown extra fields are ignored, like the OpenAI API does.
 
 use std::sync::Arc;
 
@@ -14,12 +14,14 @@ use serde_json::json;
 
 use crate::api::error::ApiError;
 use crate::api::exec::transcribe_range;
-use crate::audio::{TARGET_SR, decode_to_pcm_16k};
+use crate::api::verbose::{self, Chunk};
+use crate::audio::{TARGET_SR, decode_to_pcm_16k, samples_to_sec};
 use crate::chunk::chunk_ranges;
 use crate::server::AppState;
 
 enum ResponseFormat {
     Json,
+    VerboseJson,
     Text,
 }
 
@@ -55,10 +57,11 @@ pub async fn transcribe(
 
     let format = match response_format.as_deref() {
         None | Some("json") => ResponseFormat::Json,
+        Some("verbose_json") => ResponseFormat::VerboseJson,
         Some("text") => ResponseFormat::Text,
         Some(other) => {
             return Err(ApiError::bad_request(format!(
-                "unsupported response_format: {other} (expected json or text)"
+                "unsupported response_format: {other} (expected json, verbose_json or text)"
             )));
         }
     };
@@ -79,9 +82,11 @@ pub async fn transcribe(
     );
     // Shared so per-chunk blocking tasks borrow ranges without copying PCM.
     let pcm = Arc::new(pcm);
-    let mut parts: Vec<String> = Vec::with_capacity(ranges.len());
+    let duration = samples_to_sec(pcm.len());
+    let mut chunks: Vec<Chunk> = Vec::with_capacity(ranges.len());
     for range in ranges {
-        let text = transcribe_range(
+        let span = samples_to_sec(range.start)..samples_to_sec(range.end);
+        let transcript = transcribe_range(
             &state,
             Arc::clone(&pcm),
             range,
@@ -89,13 +94,17 @@ pub async fn transcribe(
             language.clone(),
         )
         .await?;
-        parts.push(text.text);
+        chunks.push(Chunk { span, transcript });
     }
-    let text = crate::api::join_parts(&parts);
 
     Ok(match format {
-        ResponseFormat::Json => axum::Json(json!({ "text": text })).into_response(),
-        ResponseFormat::Text => text.into_response(),
+        ResponseFormat::Json => {
+            axum::Json(json!({ "text": verbose::joined_text(&chunks) })).into_response()
+        }
+        ResponseFormat::VerboseJson => {
+            axum::Json(verbose::body(&chunks, duration, language.as_deref())).into_response()
+        }
+        ResponseFormat::Text => verbose::joined_text(&chunks).into_response(),
     })
 }
 

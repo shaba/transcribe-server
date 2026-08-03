@@ -192,6 +192,106 @@ async fn transcriptions_wav_fastpath_through_full_http_path() {
     assert_eq!(json["text"], "fake:m1:16000");
 }
 
+/// verbose_json: the OpenAI shape, with timestamps for a single-chunk file.
+#[tokio::test]
+async fn transcriptions_verbose_json_has_openai_shape() {
+    let base = spawn_fake_app(auth_keys(&[])).await;
+    let form = transcription_form(wav_16k_mono(1.0), "audio.wav")
+        .text("model", "m1")
+        .text("language", "ru")
+        .text("response_format", "verbose_json");
+    let resp = post_transcription(&base, form, None).await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.expect("JSON body");
+    assert_eq!(json["task"], "transcribe");
+    assert_eq!(json["language"], "ru");
+    assert_eq!(json["duration"], 1.0);
+    assert_eq!(json["text"], "fake:m1:16000");
+    let segments = json["segments"].as_array().expect("segments array");
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0]["id"], 0);
+    assert_eq!(segments[0]["start"], 0.0);
+    assert_eq!(segments[0]["end"], 1.0);
+    assert_eq!(segments[0]["text"], "fake:m1:16000");
+    let words = json["words"].as_array().expect("words array");
+    assert!(!words.is_empty());
+    assert_eq!(words[0]["start"], 0.0);
+    assert_eq!(
+        words.last().expect("last word")["end"],
+        serde_json::json!(1.0)
+    );
+}
+
+/// The chunker's silent killer: every chunk is transcribed on its own, so its
+/// timestamps start at zero and must be shifted by the chunk's offset in the
+/// file. A 2 s file with a 0.5 s chunk window is cut into four chunks (a pure
+/// sine has no silence to cut at, so the cuts are exactly at the window edge),
+/// and the segments must run 0.0, 0.5, 1.0, 1.5 -- not 0.0 four times.
+#[tokio::test]
+async fn transcriptions_verbose_json_timestamps_are_absolute_across_chunks() {
+    let cfg = Arc::new(
+        Config::try_parse_from(["ts", "--parallel", "2", "--chunk-max-sec", "0.5"])
+            .expect("parse config"),
+    );
+    let base = spawn_app_with_cfg(Arc::new(FakeEngine), auth_keys(&[]), cfg).await;
+    let form =
+        transcription_form(wav_16k_mono(2.0), "audio.wav").text("response_format", "verbose_json");
+    let resp = post_transcription(&base, form, None).await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.expect("JSON body");
+
+    assert_eq!(json["duration"], 2.0);
+    let segments = json["segments"].as_array().expect("segments array");
+    assert_eq!(segments.len(), 4, "expected four chunks: {segments:?}");
+    let bounds: Vec<(f64, f64)> = segments
+        .iter()
+        .map(|s| {
+            (
+                s["start"].as_f64().expect("start"),
+                s["end"].as_f64().expect("end"),
+            )
+        })
+        .collect();
+    assert_eq!(bounds, [(0.0, 0.5), (0.5, 1.0), (1.0, 1.5), (1.5, 2.0)]);
+    for (i, segment) in segments.iter().enumerate() {
+        assert_eq!(segment["id"], i, "ids must be dense and ordered");
+    }
+
+    // Words are shifted by the same offset and stay ordered across chunks.
+    let words = json["words"].as_array().expect("words array");
+    assert_eq!(words.len(), 12, "3 fake words per chunk");
+    assert_eq!(words[0]["start"], 0.0);
+    assert_eq!(
+        words.last().expect("last word")["end"],
+        serde_json::json!(2.0)
+    );
+    let starts: Vec<f64> = words
+        .iter()
+        .map(|w| w["start"].as_f64().expect("start"))
+        .collect();
+    assert!(
+        starts.windows(2).all(|p| p[0] < p[1]),
+        "word starts must increase across chunks: {starts:?}"
+    );
+}
+
+/// Default (no response_format) stays the bare {"text": ...} Open WebUI relies
+/// on: no segments, no words, no duration.
+#[tokio::test]
+async fn transcriptions_default_json_carries_no_timestamps() {
+    let base = spawn_fake_app(auth_keys(&[])).await;
+    let form = transcription_form(wav_16k_mono(1.0), "audio.wav");
+    let resp = post_transcription(&base, form, None).await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.expect("JSON body");
+    assert_eq!(json["text"], "fake:default:16000");
+    assert_eq!(
+        json.as_object().expect("object").len(),
+        1,
+        "the default json body must stay a single text field: {json}"
+    );
+}
+
 #[tokio::test]
 async fn transcriptions_unknown_response_format_is_400() {
     let base = spawn_fake_app(auth_keys(&[])).await;
