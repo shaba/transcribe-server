@@ -11,7 +11,7 @@ stack, no subprocess calls — audio decoding happens in-process via system
 libav, inference via transcribe.cpp/ggml (CPU or CUDA). One binary plus a
 GGUF model file is the whole install.
 
-Status: early development (0.0.2)
+Status: early development (0.0.3)
 
 ## Building
 
