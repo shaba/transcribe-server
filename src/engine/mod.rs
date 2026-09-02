@@ -72,6 +72,30 @@ pub struct TranscribeOptions {
     pub itn: Option<bool>,
 }
 
+/// What one loaded model is, as far as the HTTP layer needs to know. Every
+/// field is what the engine reports about the model actually loaded, not what
+/// the configuration asked for.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ModelInfo {
+    /// Request alias, the id a client passes as `model`.
+    pub id: String,
+    /// Model architecture, e.g. "gigaam" or "whisper"; empty when unknown.
+    pub arch: String,
+    /// Language codes the model handles; empty when it does not enumerate any
+    /// (a monolingual model usually does not).
+    pub languages: Vec<String>,
+    /// Whether the model can translate at all.
+    pub supports_translate: bool,
+    /// Languages it can translate into; empty means "whatever it was trained
+    /// to produce" (whisper: English) rather than "none".
+    pub translate_target_languages: Vec<String>,
+    /// Longest audio one call may hand it, in seconds; None when unbounded or
+    /// unreported. f64 because the value is milliseconds divided by 1000 and
+    /// goes straight into JSON: an f32 widened on the way out turns 12345 ms
+    /// into 12.345000267028809.
+    pub max_audio_sec: Option<f64>,
+}
+
 pub trait SttEngine: Send + Sync {
     /// pcm: 16 kHz mono f32 [-1,1]. A toggle the loaded model has no runtime
     /// switch for is ignored, not an error: a server holding several model
@@ -82,7 +106,23 @@ pub trait SttEngine: Send + Sync {
         pcm: &[f32],
         options: &TranscribeOptions,
     ) -> Result<Transcript, EngineError>;
-    fn models(&self) -> Vec<String>;
+    /// Every loaded model, in configuration order: the first one is the
+    /// default the server falls back to.
+    fn models(&self) -> Vec<ModelInfo>;
+
+    /// The model a request naming `alias` would actually run on: that alias
+    /// when it is loaded, the default model otherwise. None only when no model
+    /// is loaded at all.
+    ///
+    /// This is the same fallback [`SttEngine::transcribe`] applies, exposed so
+    /// the HTTP layer can consult the model it is about to use without
+    /// second-guessing which one that is.
+    fn resolve_model(&self, alias: Option<&str>) -> Option<ModelInfo> {
+        let models = self.models();
+        alias
+            .and_then(|alias| models.iter().find(|m| m.id == alias).cloned())
+            .or_else(|| models.first().cloned())
+    }
     fn backend(&self) -> String; // "fake" | "cpu" | "cuda" | ...
 }
 

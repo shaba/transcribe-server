@@ -29,12 +29,18 @@ use transcribe_cpp::{
 };
 
 use crate::config::ModelSpec;
-use crate::engine::{EngineError, SttEngine, TimedSpan, TranscribeOptions, Transcript};
+use crate::engine::{EngineError, ModelInfo, SttEngine, TimedSpan, TranscribeOptions, Transcript};
 
 struct LoadedModel {
     alias: String,
     model: Model,
     session: Mutex<Session>,
+    /// Read once at load: the library's capabilities are immutable for a
+    /// loaded model, and building them costs a String per supported language
+    /// (a whisper model lists a hundred). /health, every transcription and
+    /// every stream ask for this, so it must not be an FFI read plus an
+    /// allocation storm each time.
+    info: ModelInfo,
 }
 
 /// Engine holding one loaded model per configured alias; the first spec is
@@ -85,10 +91,12 @@ impl TranscribeCppEngine {
                 backend = %model.backend(),
                 "model loaded"
             );
+            let info = model_info(&spec.alias, &model);
             models.push(LoadedModel {
                 alias: spec.alias.clone(),
                 model,
                 session: Mutex::new(session),
+                info,
             });
         }
         Ok(TranscribeCppEngine { models })
@@ -171,6 +179,20 @@ pub fn init_logging() {
     LOGGING.call_once(transcribe_cpp::init_logging);
 }
 
+/// What the library reports about a freshly loaded model.
+fn model_info(alias: &str, model: &Model) -> ModelInfo {
+    let caps = model.capabilities();
+    ModelInfo {
+        id: alias.to_string(),
+        arch: model.arch(),
+        languages: caps.languages,
+        supports_translate: caps.supports_translate,
+        translate_target_languages: caps.translate_target_languages,
+        // The library reports 0 for "no limit of its own".
+        max_audio_sec: (caps.max_audio_ms > 0).then(|| caps.max_audio_ms as f64 / 1000.0),
+    }
+}
+
 /// Resolve a tri-state request toggle against what the loaded model can
 /// actually switch at run time, so a family without the switch is asked for
 /// its own default.
@@ -231,8 +253,14 @@ impl SttEngine for TranscribeCppEngine {
             .map_err(|e| EngineError::Failed(format!("model '{}': {e}", entry.alias)))
     }
 
-    fn models(&self) -> Vec<String> {
-        self.models.iter().map(|m| m.alias.clone()).collect()
+    fn models(&self) -> Vec<ModelInfo> {
+        self.models.iter().map(|entry| entry.info.clone()).collect()
+    }
+
+    fn resolve_model(&self, alias: Option<&str>) -> Option<ModelInfo> {
+        // Overridden so the common path clones one entry instead of the whole
+        // list, and so the fallback stays literally the one `resolve` applies.
+        Some(self.resolve(alias).info.clone())
     }
 
     fn backend(&self) -> String {
@@ -379,7 +407,10 @@ mod tests {
             path: path.into(),
         }];
         let engine = TranscribeCppEngine::load(&specs, true, None).expect("load model");
-        assert_eq!(engine.models(), vec!["test".to_string()]);
+        let models = engine.models();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "test");
+        assert!(!models[0].arch.is_empty());
         assert!(!engine.backend().is_empty());
         // 1 second of silence at 16 kHz; any text (possibly empty) is fine.
         let pcm = vec![0.0f32; 16000];

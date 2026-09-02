@@ -1,4 +1,4 @@
-use super::{EngineError, SttEngine, TimedSpan, TranscribeOptions, Transcript};
+use super::{EngineError, ModelInfo, SttEngine, TimedSpan, TranscribeOptions, Transcript};
 use crate::audio::samples_to_sec;
 
 pub struct FakeEngine;
@@ -56,8 +56,15 @@ impl SttEngine for FakeEngine {
         })
     }
 
-    fn models(&self) -> Vec<String> {
-        vec!["fake-model".to_string()]
+    fn models(&self) -> Vec<ModelInfo> {
+        vec![ModelInfo {
+            id: "fake-model".to_string(),
+            arch: "fake".to_string(),
+            languages: vec!["en".to_string(), "ru".to_string()],
+            supports_translate: true,
+            translate_target_languages: vec!["en".to_string()],
+            max_audio_sec: None,
+        }]
     }
 
     fn backend(&self) -> String {
@@ -161,7 +168,10 @@ mod tests {
     #[test]
     fn models_lists_fake_model() {
         let engine = FakeEngine;
-        assert_eq!(engine.models(), vec!["fake-model".to_string()]);
+        let models = engine.models();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "fake-model");
+        assert!(models[0].supports_translate);
     }
 
     #[test]

@@ -9,6 +9,6 @@ pub async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "status": "ok",
         "backend": state.engine.backend(),
-        "models": state.engine.models(),
+        "models": state.engine.models().iter().map(|m| &m.id).collect::<Vec<_>>(),
     }))
 }

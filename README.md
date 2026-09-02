@@ -325,11 +325,27 @@ are skipped).
 
 ### GET /v1/models
 
-OpenAI-style model list:
+OpenAI-style model list. The three OpenAI keys are always present; what the
+library reports about each loaded model rides along with them, so a client can
+pick a model by what it can do instead of by naming convention. A property the
+model does not report is omitted rather than sent empty.
 
 ```json
-{"object":"list","data":[{"id":"ru","object":"model","owned_by":"transcribe-server"}]}
+{"object":"list","data":[{
+  "id":"ru","object":"model","owned_by":"transcribe-server",
+  "arch":"gigaam","languages":["ru"],
+  "supports_translate":false,
+  "max_audio_sec":30.0
+}]}
 ```
+
+| Key | Meaning |
+| --- | --- |
+| `arch` | Model architecture as the library names it (`gigaam`, `whisper`, ...) |
+| `languages` | Language codes the model handles; absent when it enumerates none (typical for monolingual models) |
+| `supports_translate` | Whether the model can translate at all |
+| `translate_target_languages` | Targets it can translate into; absent means "whatever it was trained to produce" |
+| `max_audio_sec` | Longest audio one inference call may take; absent when the model sets no limit of its own |
 
 ### GET /health
 

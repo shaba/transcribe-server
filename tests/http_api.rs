@@ -36,6 +36,26 @@ async fn models_returns_openai_style_list() {
     assert_eq!(json["data"].as_array().expect("data array").len(), 1);
 }
 
+/// What the library reports about a loaded model rides along with the OpenAI
+/// keys, so a client can pick a model by capability rather than by name.
+#[tokio::test]
+async fn models_carry_the_reported_capabilities() {
+    let base = spawn_fake_app(auth_keys(&[])).await;
+    let resp = reqwest::get(format!("{base}/v1/models"))
+        .await
+        .expect("GET");
+    let json: serde_json::Value = resp.json().await.expect("JSON body");
+    let model = &json["data"][0];
+    assert_eq!(model["languages"], serde_json::json!(["en", "ru"]));
+    assert_eq!(model["supports_translate"], true);
+    assert_eq!(
+        model["translate_target_languages"],
+        serde_json::json!(["en"])
+    );
+    // Unreported by the fake engine, so absent rather than null.
+    assert!(model.get("max_audio_sec").is_none(), "{model}");
+}
+
 #[tokio::test]
 async fn models_without_key_is_401_when_keys_configured() {
     let base = spawn_fake_app(auth_keys(&["secret"])).await;

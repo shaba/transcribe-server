@@ -54,7 +54,9 @@ async fn run(cfg: Config) -> Result<(), String> {
     let engine = build_engine(&cfg)?;
     tracing::info!(
         backend = %engine.backend(),
-        models = ?engine.models(),
+        // Ids only: a ModelInfo carries every language the model enumerates,
+        // which is a hundred of them for a whisper model.
+        models = ?engine.models().iter().map(|m| &m.id).collect::<Vec<_>>(),
         "engine ready"
     );
 
