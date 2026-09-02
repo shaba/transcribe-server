@@ -33,6 +33,10 @@ pub fn build_router(state: AppState, keys: AuthKeys) -> Router {
             "/v1/audio/transcriptions",
             post(crate::api::transcriptions::transcribe),
         )
+        .route(
+            "/v1/audio/translations",
+            post(crate::api::transcriptions::translate),
+        )
         .route("/v1/audio/stream", get(crate::api::stream::stream))
         .layer(middleware::from_fn_with_state(keys, require_api_key));
     Router::new()

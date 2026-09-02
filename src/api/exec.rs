@@ -47,7 +47,9 @@ pub(crate) async fn transcribe_range(
 
 fn engine_error(err: EngineError) -> ApiError {
     match err {
-        EngineError::UnknownModel(_) => ApiError::bad_request(err.to_string()),
+        EngineError::UnknownModel(_) | EngineError::Unsupported(_) => {
+            ApiError::bad_request(err.to_string())
+        }
         EngineError::Failed(_) => ApiError::internal(err.to_string()),
     }
 }

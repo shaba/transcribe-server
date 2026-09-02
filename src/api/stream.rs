@@ -73,7 +73,11 @@ async fn run_session(socket: &mut WebSocket, state: &AppState) -> SessionEnd {
     };
     let options = Arc::new(TranscribeOptions {
         model: start.model,
+        // Streaming dictation is transcription; a translation stream would
+        // need a protocol for the target language and has no caller yet.
+        task: crate::engine::Task::Transcribe,
         language: start.language.or_else(|| state.cfg.language.clone()),
+        target_language: None,
         pnc: start.pnc.or(state.cfg.pnc),
         itn: start.itn.or(state.cfg.itn),
     });

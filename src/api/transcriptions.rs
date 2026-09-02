@@ -1,8 +1,12 @@
-//! POST /v1/audio/transcriptions: OpenAI-compatible multipart transcription.
+//! POST /v1/audio/transcriptions and /v1/audio/translations: OpenAI-compatible
+//! multipart speech-to-text.
 //!
-//! This is the Open WebUI dictation contract: multipart fields `file`
-//! (required), `model`, `language`, `response_format` (json|verbose_json|text,
-//! default json). Unknown extra fields are ignored, like the OpenAI API does.
+//! The transcriptions route is the dictation contract every OpenAI STT client
+//! sends: multipart fields `file` (required), `model`, `language`,
+//! `response_format` (json|verbose_json|text, default json). Unknown extra
+//! fields are ignored, like the OpenAI API does. The translations route takes
+//! the same fields and asks the model to translate instead; both share one
+//! handler because only the task differs.
 
 use std::sync::Arc;
 
@@ -18,7 +22,7 @@ use crate::api::verbose::{self, Chunk};
 use crate::audio::{TARGET_SR, decode_to_pcm_16k, samples_to_sec};
 use crate::chunk::chunk_ranges;
 use crate::config::toggle;
-use crate::engine::TranscribeOptions;
+use crate::engine::{ModelInfo, Task, TranscribeOptions};
 use crate::server::AppState;
 
 enum ResponseFormat {
@@ -29,7 +33,25 @@ enum ResponseFormat {
 
 pub async fn transcribe(
     State(state): State<AppState>,
+    multipart: Multipart,
+) -> Result<Response, ApiError> {
+    handle(state, multipart, Task::Transcribe).await
+}
+
+/// POST /v1/audio/translations: same request shape, translated output. The
+/// target language is the model's own (English for whisper); the
+/// `target_language` field picks one on families that offer a choice.
+pub async fn translate(
+    State(state): State<AppState>,
+    multipart: Multipart,
+) -> Result<Response, ApiError> {
+    handle(state, multipart, Task::Translate).await
+}
+
+async fn handle(
+    state: AppState,
     mut multipart: Multipart,
+    task: Task,
 ) -> Result<Response, ApiError> {
     let limit_mb = state.cfg.max_upload_mb;
     // The upload is buffered whole (both here and, for anything but the WAV
@@ -42,6 +64,7 @@ pub async fn transcribe(
     let mut response_format: Option<String> = None;
     let mut pnc: Option<String> = None;
     let mut itn: Option<String> = None;
+    let mut target_language: Option<String> = None;
 
     while let Some(field) = multipart
         .next_field()
@@ -60,6 +83,7 @@ pub async fn transcribe(
             "model" => model = Some(text_field(field, limit_mb).await?),
             "language" => language = Some(text_field(field, limit_mb).await?),
             "response_format" => response_format = Some(text_field(field, limit_mb).await?),
+            "target_language" => target_language = Some(text_field(field, limit_mb).await?),
             "pnc" => pnc = Some(text_field(field, limit_mb).await?),
             "itn" => itn = Some(text_field(field, limit_mb).await?),
             _ => {} // ignore unknown fields (temperature, prompt, ...)
@@ -84,18 +108,48 @@ pub async fn transcribe(
         }
     };
     let file = file.ok_or_else(|| ApiError::bad_request("missing required field: file"))?;
+    // The model this request will run on, resolved once: it answers whether a
+    // translation is possible at all and what language the answer will be in.
+    let model_info = state.engine.resolve_model(model.as_deref());
+    // Checked here rather than left to the engine, which would only see it
+    // after libav decoded the whole upload and the request waited its turn for
+    // an engine slot -- a long way to go for an answer known from the alias.
+    // The engine keeps its own check: it is the authority, this is the shortcut.
+    let target_language = match task {
+        Task::Transcribe => None,
+        Task::Translate => {
+            reject_impossible_translation(
+                model.as_deref(),
+                model_info.as_ref(),
+                target_language.as_deref(),
+            )?;
+            // Normalized once, here: the check above accepts " EN " for a
+            // model listing "en", and everything downstream -- the engine's
+            // own check, the library, the language the response reports --
+            // has to see the same spelling that was accepted.
+            target_language.map(|target| match &model_info {
+                Some(info) => info.canonical_translate_target(&target).to_string(),
+                None => target.trim().to_string(),
+            })
+        }
+    };
     // Decoding (tempfile + libav) is CPU/IO-bound: keep it off the async
     // runtime threads.
     let pcm = tokio::task::spawn_blocking(move || decode_to_pcm_16k(&file))
         .await
         .map_err(|e| ApiError::internal(format!("decode task failed: {e}")))?
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
-    let language = language.or_else(|| state.cfg.language.clone());
+    let language = language
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .or_else(|| state.cfg.language.clone());
     // Request wins over the server-wide default; neither set leaves the model
     // family's own behavior untouched.
     let options = Arc::new(TranscribeOptions {
         model,
+        task,
         language: language.clone(),
+        target_language,
         pnc: pnc.or(state.cfg.pnc),
         itn: itn.or(state.cfg.itn),
     });
@@ -122,10 +176,52 @@ pub async fn transcribe(
             axum::Json(json!({ "text": verbose::joined_text(&chunks) })).into_response()
         }
         ResponseFormat::VerboseJson => {
-            axum::Json(verbose::body(&chunks, duration, language.as_deref())).into_response()
+            let reported = match task {
+                Task::Transcribe => language.clone(),
+                // The text is in the target language, so saying the source
+                // language here would label English output as Russian.
+                Task::Translate => options
+                    .target_language
+                    .clone()
+                    .or_else(|| single_translate_target(model_info.as_ref())),
+            };
+            axum::Json(verbose::body(&chunks, task, duration, reported.as_deref())).into_response()
         }
         ResponseFormat::Text => verbose::joined_text(&chunks).into_response(),
     })
+}
+
+/// Refuse a translation the model cannot produce, before anything expensive
+/// happens. The rule itself lives on [`ModelInfo`], which is also what the
+/// engine asks right before the run.
+fn reject_impossible_translation(
+    requested: Option<&str>,
+    model: Option<&ModelInfo>,
+    target: Option<&str>,
+) -> Result<(), ApiError> {
+    let Some(model) = model else {
+        return Ok(()); // No model loaded: the engine reports that, not this.
+    };
+    // An unknown alias runs on the default model, so the message names the one
+    // that was actually consulted; saying only "model 'x' cannot translate"
+    // about a model the client never asked for reads as a different bug.
+    let named = match requested {
+        Some(alias) if alias != model.id => format!("model '{alias}' resolves to '{}'", model.id),
+        _ => format!("model '{}'", model.id),
+    };
+    match model.translation_refusal(&named, target) {
+        Some(refusal) => Err(ApiError::bad_request(refusal)),
+        None => Ok(()),
+    }
+}
+
+/// The language a translation will come out in when the caller named none:
+/// knowable only when the model advertises exactly one target.
+fn single_translate_target(model: Option<&ModelInfo>) -> Option<String> {
+    match model?.translate_target_languages.as_slice() {
+        [only] => Some(only.clone()),
+        _ => None,
+    }
 }
 
 /// A boolean request field, spelled exactly like its `--pnc`/`--itn` flag.

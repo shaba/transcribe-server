@@ -9,7 +9,7 @@ use std::ops::Range;
 
 use serde_json::{Value, json};
 
-use crate::engine::Transcript;
+use crate::engine::{Task, Transcript};
 
 /// One transcribed chunk: where it sits in the recording (seconds) and what
 /// the engine returned for it, already timed relative to the recording.
@@ -30,14 +30,24 @@ pub(crate) fn joined_text(chunks: &[Chunk]) -> String {
 /// Build the `verbose_json` body: OpenAI's shape, with `words` present only
 /// when the model produced word rows.
 ///
-/// `duration` is the length of the decoded audio in seconds;
-/// `requested_language` is the language the caller asked for, used only when
-/// the model reports none of its own.
-pub(crate) fn body(chunks: &[Chunk], duration: f32, requested_language: Option<&str>) -> Value {
-    let language = chunks
-        .iter()
-        .find_map(|c| c.transcript.language.clone())
-        .or_else(|| requested_language.map(str::to_string))
+/// `duration` is the length of the decoded audio in seconds.
+///
+/// `reported_language` is what the caller should be told the text is in. For a
+/// transcription it is a fallback, used only when the model detects no
+/// language of its own; for a translation it is the answer, because the
+/// language the model detected is the source and the text is not in it.
+pub(crate) fn body(
+    chunks: &[Chunk],
+    task: Task,
+    duration: f32,
+    reported_language: Option<&str>,
+) -> Value {
+    let detected = match task {
+        Task::Transcribe => chunks.iter().find_map(|c| c.transcript.language.clone()),
+        Task::Translate => None,
+    };
+    let language = detected
+        .or_else(|| reported_language.map(str::to_string))
         .unwrap_or_else(|| "unknown".to_string());
 
     let mut segments: Vec<Value> = Vec::new();
@@ -74,7 +84,7 @@ pub(crate) fn body(chunks: &[Chunk], duration: f32, requested_language: Option<&
         .collect();
 
     let mut body = json!({
-        "task": "transcribe",
+        "task": task.as_str(),
         "language": language,
         "duration": sec(duration),
         "text": joined_text(chunks),
@@ -136,7 +146,7 @@ mod tests {
 
     #[test]
     fn body_has_the_openai_verbose_shape() {
-        let body = body(&two_chunks(), 3.5, None);
+        let body = body(&two_chunks(), Task::Transcribe, 3.5, None);
         assert_eq!(body["task"], "transcribe");
         assert_eq!(body["language"], "ru");
         assert_eq!(body["duration"], 3.5);
@@ -154,7 +164,7 @@ mod tests {
 
     #[test]
     fn words_are_concatenated_in_order() {
-        let body = body(&two_chunks(), 3.5, None);
+        let body = body(&two_chunks(), Task::Transcribe, 3.5, None);
         let words = body["words"].as_array().expect("words array");
         let seen: Vec<(&str, f64)> = words
             .iter()
@@ -178,7 +188,7 @@ mod tests {
                 ..Transcript::default()
             },
         }];
-        let body = body(&chunks, 1.0, None);
+        let body = body(&chunks, Task::Transcribe, 1.0, None);
         assert!(body.get("words").is_none(), "{body}");
     }
 
@@ -194,7 +204,7 @@ mod tests {
                 transcript: Transcript::text_only("second"),
             },
         ];
-        let body = body(&chunks, 40.0, None);
+        let body = body(&chunks, Task::Transcribe, 40.0, None);
         let segments = body["segments"].as_array().expect("segments array");
         assert_eq!(segments.len(), 2);
         assert_eq!(segments[0]["start"], 0.0);
@@ -221,12 +231,39 @@ mod tests {
                 },
             },
         ];
-        let body = body(&chunks, 2.0, None);
+        let body = body(&chunks, Task::Transcribe, 2.0, None);
         let segments = body["segments"].as_array().expect("segments array");
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0]["id"], 0);
         assert_eq!(segments[0]["text"], "spoken");
         assert_eq!(body["text"], "spoken");
+    }
+
+    /// A translation is not in the language the model detected -- that is the
+    /// source -- so the detected value must not be reported for it.
+    #[test]
+    fn a_translation_reports_the_language_it_was_told_to() {
+        let chunks = vec![Chunk {
+            span: 0.0..1.0,
+            transcript: Transcript {
+                text: "hello".to_string(),
+                language: Some("ru".to_string()),
+                ..Transcript::default()
+            },
+        }];
+        assert_eq!(
+            body(&chunks, Task::Translate, 1.0, Some("en"))["language"],
+            "en"
+        );
+        assert_eq!(
+            body(&chunks, Task::Translate, 1.0, None)["language"],
+            "unknown"
+        );
+        // The same chunks transcribed still report what the model detected.
+        assert_eq!(
+            body(&chunks, Task::Transcribe, 1.0, Some("en"))["language"],
+            "ru"
+        );
     }
 
     #[test]
@@ -235,8 +272,14 @@ mod tests {
             span: 0.0..1.0,
             transcript: Transcript::text_only("x"),
         }];
-        assert_eq!(body(&chunks, 1.0, Some("ru"))["language"], "ru");
-        assert_eq!(body(&chunks, 1.0, None)["language"], "unknown");
+        assert_eq!(
+            body(&chunks, Task::Transcribe, 1.0, Some("ru"))["language"],
+            "ru"
+        );
+        assert_eq!(
+            body(&chunks, Task::Transcribe, 1.0, None)["language"],
+            "unknown"
+        );
         // A language the model detected wins over the requested one.
         let detected = vec![Chunk {
             span: 0.0..1.0,
@@ -246,7 +289,10 @@ mod tests {
                 ..Transcript::default()
             },
         }];
-        assert_eq!(body(&detected, 1.0, Some("ru"))["language"], "en");
+        assert_eq!(
+            body(&detected, Task::Transcribe, 1.0, Some("ru"))["language"],
+            "en"
+        );
     }
 
     #[test]
@@ -260,7 +306,7 @@ mod tests {
                 ..Transcript::default()
             },
         }];
-        let body = body(&chunks, 1.0 / 3.0, None);
+        let body = body(&chunks, Task::Transcribe, 1.0 / 3.0, None);
         assert_eq!(body["segments"][0]["start"], 0.3);
         assert_eq!(body["segments"][0]["end"], 0.333);
         assert_eq!(body["duration"], 0.333);
@@ -268,7 +314,7 @@ mod tests {
 
     #[test]
     fn no_chunks_yields_an_empty_but_well_formed_body() {
-        let body = body(&[], 0.0, None);
+        let body = body(&[], Task::Transcribe, 0.0, None);
         assert_eq!(body["text"], "");
         assert_eq!(body["duration"], 0.0);
         assert_eq!(body["segments"].as_array().expect("array").len(), 0);

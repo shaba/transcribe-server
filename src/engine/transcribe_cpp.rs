@@ -23,13 +23,16 @@
 
 use std::sync::Mutex;
 
+use transcribe_cpp::Task as CppTask;
 use transcribe_cpp::{
     Backend, Feature, Itn, Model, ModelOptions, Pnc, RunOptions, Session, SessionOptions,
     init_backends_default,
 };
 
 use crate::config::ModelSpec;
-use crate::engine::{EngineError, ModelInfo, SttEngine, TimedSpan, TranscribeOptions, Transcript};
+use crate::engine::{
+    EngineError, ModelInfo, SttEngine, Task, TimedSpan, TranscribeOptions, Transcript,
+};
 
 struct LoadedModel {
     alias: String,
@@ -231,12 +234,35 @@ impl SttEngine for TranscribeCppEngine {
         // guards.
         let pnc = resolve_pnc(request.pnc, entry.model.supports(Feature::Pnc));
         let itn = resolve_itn(request.itn, entry.model.supports(Feature::Itn));
+        let task = match request.task {
+            Task::Transcribe => CppTask::Transcribe,
+            Task::Translate => {
+                // Asked of the cached capabilities, not of the library: the
+                // answer cannot change for a loaded model, and rebuilding it
+                // allocates a String per supported language.
+                if let Some(refusal) = entry.info.translation_refusal(
+                    &format!("model '{}'", entry.alias),
+                    request.target_language.as_deref(),
+                ) {
+                    return Err(EngineError::Unsupported(refusal));
+                }
+                CppTask::Translate
+            }
+        };
         // RunOptions::default() asks for TimestampKind::Auto, i.e. the richest
         // granularity the family supports (token-level for GigaAM, segment for
         // whisper). Which rows actually come back is family-dependent, so the
         // mapping below copies whatever is populated and never assumes.
         let options = RunOptions {
+            task,
             language: request.language.clone(),
+            // Only meaningful for a translation; the library documents its
+            // meaning on a transcribe run as undefined, so it never travels
+            // with one whatever the caller put in the options.
+            target_language: match request.task {
+                Task::Translate => request.target_language.clone(),
+                Task::Transcribe => None,
+            },
             pnc,
             itn,
             ..RunOptions::default()

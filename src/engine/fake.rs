@@ -1,4 +1,4 @@
-use super::{EngineError, ModelInfo, SttEngine, TimedSpan, TranscribeOptions, Transcript};
+use super::{EngineError, ModelInfo, SttEngine, Task, TimedSpan, TranscribeOptions, Transcript};
 use crate::audio::samples_to_sec;
 
 pub struct FakeEngine;
@@ -10,9 +10,10 @@ impl SttEngine for FakeEngine {
     /// a real model. The reported language is the requested one: the fake
     /// "detects" whatever it was told.
     ///
-    /// A toggle the caller set is echoed too (`...:pnc=off`), which is what
-    /// lets the HTTP tests assert that a request field reached the engine.
-    /// An unset toggle adds nothing, so the default text shape is unchanged.
+    /// A toggle the caller set is echoed too (`...:pnc=off`), as is a
+    /// translation request (`...:translate=en`), which is what lets the HTTP
+    /// tests assert that a request field reached the engine. Anything left at
+    /// its default adds nothing, so the plain text shape is unchanged.
     fn transcribe(
         &self,
         pcm: &[f32],
@@ -23,6 +24,12 @@ impl SttEngine for FakeEngine {
             options.model.as_deref().unwrap_or("default"),
             pcm.len()
         );
+        if options.task == Task::Translate {
+            text.push_str(&format!(
+                ":translate={}",
+                options.target_language.as_deref().unwrap_or("auto")
+            ));
+        }
         if let Some(pnc) = options.pnc {
             text.push_str(&format!(":pnc={}", on_off(pnc)));
         }

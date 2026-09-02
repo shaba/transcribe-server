@@ -6,9 +6,10 @@ mod common;
 use std::sync::Arc;
 
 use clap::Parser;
-use common::{auth_keys, spawn_app_with_cfg, spawn_fake_app};
+use common::{auth_keys, spawn_app, spawn_app_with_cfg, spawn_fake_app};
 use transcribe_server::config::Config;
 use transcribe_server::engine::fake::FakeEngine;
+use transcribe_server::engine::{EngineError, ModelInfo, SttEngine, TranscribeOptions, Transcript};
 
 #[tokio::test]
 async fn health_reports_ok_backend_and_models() {
@@ -118,11 +119,78 @@ async fn post_transcription(
     form: reqwest::multipart::Form,
     bearer: Option<&str>,
 ) -> reqwest::Response {
-    let mut req = reqwest::Client::new().post(format!("{base}/v1/audio/transcriptions"));
+    post_audio(base, "transcriptions", form, bearer).await
+}
+
+async fn post_audio(
+    base: &str,
+    route: &str,
+    form: reqwest::multipart::Form,
+    bearer: Option<&str>,
+) -> reqwest::Response {
+    let mut req = reqwest::Client::new().post(format!("{base}/v1/audio/{route}"));
     if let Some(key) = bearer {
         req = req.header("authorization", format!("Bearer {key}"));
     }
     req.multipart(form).send().await.expect("POST")
+}
+
+/// /v1/audio/translations is the OpenAI translation route: same request shape
+/// as transcriptions, but the engine is asked to translate.
+#[tokio::test]
+async fn translations_ask_the_engine_for_the_translate_task() {
+    let base = spawn_fake_app(auth_keys(&[])).await;
+    let form = transcription_form(wav_16k_mono(0.1), "a.wav");
+    let resp = post_audio(&base, "translations", form, None).await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.expect("JSON body");
+    let text = json["text"].as_str().expect("text field");
+    assert!(text.contains(":translate=auto"), "unexpected text: {text}");
+}
+
+/// target_language is an extension over the OpenAI shape, which always
+/// translates into English.
+#[tokio::test]
+async fn translations_pass_the_requested_target_language() {
+    let base = spawn_fake_app(auth_keys(&[])).await;
+    let form = transcription_form(wav_16k_mono(0.1), "a.wav").text("target_language", "en");
+    let resp = post_audio(&base, "translations", form, None).await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.expect("JSON body");
+    let text = json["text"].as_str().expect("text field");
+    assert!(text.contains(":translate=en"), "unexpected text: {text}");
+}
+
+#[tokio::test]
+async fn translations_verbose_json_reports_the_translate_task() {
+    let base = spawn_fake_app(auth_keys(&[])).await;
+    let form =
+        transcription_form(wav_16k_mono(0.1), "a.wav").text("response_format", "verbose_json");
+    let resp = post_audio(&base, "translations", form, None).await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.expect("JSON body");
+    assert_eq!(json["task"], "translate");
+}
+
+#[tokio::test]
+async fn translations_without_key_is_401_when_keys_configured() {
+    let base = spawn_fake_app(auth_keys(&["secret"])).await;
+    let form = transcription_form(wav_16k_mono(0.1), "a.wav");
+    let resp = post_audio(&base, "translations", form, None).await;
+    assert_eq!(resp.status(), 401);
+}
+
+/// The transcriptions route must keep asking for transcription: the shared
+/// handler takes the task from the route, not from the request.
+#[tokio::test]
+async fn transcriptions_never_ask_for_translation() {
+    let base = spawn_fake_app(auth_keys(&[])).await;
+    let form = transcription_form(wav_16k_mono(0.1), "a.wav").text("target_language", "en");
+    let resp = post_transcription(&base, form, None).await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.expect("JSON body");
+    let text = json["text"].as_str().expect("text field");
+    assert!(!text.contains(":translate"), "unexpected text: {text}");
 }
 
 /// The pnc/itn request fields are a documented extension over the OpenAI
@@ -424,4 +492,151 @@ async fn transcriptions_oversized_body_is_413_with_api_error_shape() {
             .expect("message")
             .contains("1 MB")
     );
+}
+
+/// An engine reporting exactly the capabilities a test needs.
+struct Capable(ModelInfo);
+
+impl SttEngine for Capable {
+    /// Echoes the target it was handed, so a test can assert what reached the
+    /// engine rather than only what the HTTP layer accepted.
+    fn transcribe(
+        &self,
+        _pcm: &[f32],
+        options: &TranscribeOptions,
+    ) -> Result<Transcript, EngineError> {
+        Ok(Transcript::text_only(format!(
+            "text:to={}",
+            options.target_language.as_deref().unwrap_or("none")
+        )))
+    }
+
+    fn models(&self) -> Vec<ModelInfo> {
+        vec![self.0.clone()]
+    }
+
+    fn backend(&self) -> String {
+        "capable".to_string()
+    }
+}
+
+/// The audio is deliberately not decodable: if the answer is about
+/// translation rather than about corrupt audio, the model was consulted before
+/// the upload was decoded -- which is the point, since decoding a 256 MB
+/// upload to answer a question the alias already settles is pure waste.
+#[tokio::test]
+async fn an_impossible_translation_is_refused_before_the_audio_is_decoded() {
+    let engine = Arc::new(Capable(ModelInfo {
+        id: "ru-only".to_string(),
+        supports_translate: false,
+        ..ModelInfo::default()
+    }));
+    let base = spawn_app(engine, auth_keys(&[])).await;
+    let form = transcription_form(b"not audio at all".to_vec(), "a.wav");
+    let resp = post_audio(&base, "translations", form, None).await;
+    assert_eq!(resp.status(), 400);
+    let json: serde_json::Value = resp.json().await.expect("JSON body");
+    let message = json["error"]["message"].as_str().expect("message");
+    assert!(
+        message.contains("cannot translate"),
+        "unexpected message: {message}"
+    );
+}
+
+/// An unknown alias runs on the default model, so the refusal has to name
+/// both: the alias the client sent and the model that was actually consulted.
+#[tokio::test]
+async fn a_refusal_names_the_alias_and_the_model_it_resolved_to() {
+    let engine = Arc::new(Capable(ModelInfo {
+        id: "gigaam".to_string(),
+        supports_translate: false,
+        ..ModelInfo::default()
+    }));
+    let base = spawn_app(engine, auth_keys(&[])).await;
+    let form = transcription_form(wav_16k_mono(0.1), "a.wav").text("model", "whispr");
+    let resp = post_audio(&base, "translations", form, None).await;
+    assert_eq!(resp.status(), 400);
+    let json: serde_json::Value = resp.json().await.expect("JSON body");
+    let message = json["error"]["message"].as_str().expect("message");
+    assert!(message.contains("whispr"), "unexpected message: {message}");
+    assert!(message.contains("gigaam"), "unexpected message: {message}");
+}
+
+/// A target is a language code, not a case-sensitive token: a client sending
+/// EN to a model listing en asked for something the model does support.
+#[tokio::test]
+async fn a_target_language_matches_regardless_of_case_and_spacing() {
+    let engine = Arc::new(Capable(ModelInfo {
+        id: "en-only".to_string(),
+        supports_translate: true,
+        translate_target_languages: vec!["en".to_string()],
+        ..ModelInfo::default()
+    }));
+    let base = spawn_app(engine, auth_keys(&[])).await;
+    for spelling in ["EN", " en ", "En"] {
+        let form = transcription_form(wav_16k_mono(0.1), "a.wav").text("target_language", spelling);
+        let resp = post_audio(&base, "translations", form, None).await;
+        assert_eq!(resp.status(), 200, "rejected target_language={spelling}");
+        let json: serde_json::Value = resp.json().await.expect("JSON body");
+        // The engine gets the model's own spelling, not the caller's: it is
+        // the library that decides what code it accepts, and it was never
+        // asked about "EN".
+        assert_eq!(
+            json["text"], "text:to=en",
+            "engine got the raw target_language={spelling}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_target_language_the_model_does_not_list_is_refused() {
+    let engine = Arc::new(Capable(ModelInfo {
+        id: "en-only".to_string(),
+        supports_translate: true,
+        translate_target_languages: vec!["en".to_string()],
+        ..ModelInfo::default()
+    }));
+    let base = spawn_app(engine, auth_keys(&[])).await;
+    let form = transcription_form(wav_16k_mono(0.1), "a.wav").text("target_language", "fr");
+    let resp = post_audio(&base, "translations", form, None).await;
+    assert_eq!(resp.status(), 400);
+    let json: serde_json::Value = resp.json().await.expect("JSON body");
+    let message = json["error"]["message"].as_str().expect("message");
+    assert!(message.contains("fr"), "unexpected message: {message}");
+}
+
+/// A model that advertises no target list has not claimed it has none, so the
+/// request goes through and the library decides.
+#[tokio::test]
+async fn an_unadvertised_target_list_is_not_a_rejection() {
+    let engine = Arc::new(Capable(ModelInfo {
+        id: "whisper".to_string(),
+        supports_translate: true,
+        ..ModelInfo::default()
+    }));
+    let base = spawn_app(engine, auth_keys(&[])).await;
+    let form = transcription_form(wav_16k_mono(0.1), "a.wav").text("target_language", "fr");
+    let resp = post_audio(&base, "translations", form, None).await;
+    assert_eq!(resp.status(), 200);
+}
+
+/// The single advertised target is what a translation without an explicit
+/// target comes out in, and verbose_json says so instead of naming the source.
+#[tokio::test]
+async fn translations_verbose_json_reports_the_produced_language() {
+    let engine = Arc::new(Capable(ModelInfo {
+        id: "en-only".to_string(),
+        supports_translate: true,
+        translate_target_languages: vec!["en".to_string()],
+        ..ModelInfo::default()
+    }));
+    let base = spawn_app(engine, auth_keys(&[])).await;
+    let form = transcription_form(wav_16k_mono(0.1), "a.wav")
+        .text("language", "ru")
+        .text("response_format", "verbose_json");
+    let resp = post_audio(&base, "translations", form, None).await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.expect("JSON body");
+    assert_eq!(json["task"], "translate");
+    assert_eq!(json["language"], "en");
 }

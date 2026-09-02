@@ -222,7 +222,8 @@ seconds) at energy-VAD silence points and the chunk transcripts are joined.
 
 `pnc` and `itn` are an extension over the OpenAI shape (which has no field for
 either) and accept `on`/`off`, `true`/`false`, `1`/`0`, `yes`/`no`; anything
-else is a 400. Leaving both unset keeps each model family's shipped behavior,
+else is a 400. Language codes (`language`, `target_language`) are matched
+case-insensitively and trimmed, so `EN` and `en` name the same language. Leaving both unset keeps each model family's shipped behavior,
 which is what its published accuracy was measured with. They are runtime
 switches only some families implement (the library is asked what the loaded
 model supports): a request for one on a model without the switch is
@@ -279,6 +280,50 @@ Adds the timestamps the model produced, in the OpenAI `verbose_json` shape:
 curl -s -H "Authorization: Bearer secret" \
   -F file=@meeting.wav -F response_format=verbose_json \
   http://127.0.0.1:8010/v1/audio/transcriptions
+```
+
+### POST /v1/audio/translations
+
+The OpenAI translation route: the same request shape as
+`/v1/audio/transcriptions`, but the model is asked to translate the speech
+instead of transcribing it. `response_format=verbose_json` reports
+`"task": "translate"`.
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `file` | yes | Audio file, as for transcriptions |
+| `model` | no | Model alias |
+| `target_language` | no | Language to translate into (extension, see below) |
+| `language` | no | Hint for the language of the audio (extension) |
+| `response_format` | no | `json` (default), `verbose_json` or `text` |
+| `pnc`, `itn` | no | As for transcriptions |
+
+The OpenAI API always translates into English and has neither field;
+transcribe.cpp model families differ in what they can produce, so
+`target_language` picks a target on families that offer a choice and
+`language` hints at the source. Leaving both unset is the OpenAI behavior:
+the model translates into whatever it was trained to produce (English, for
+whisper).
+
+A model that cannot translate at all, or that lists its targets and does not
+list the requested one, is a 400 rather than a silently transcribed answer —
+the caller asked for a translation and would otherwise get source-language
+text back without knowing. The answer comes from the model alias alone, before
+the upload is decoded. A model that advertises no target list has not claimed
+it has none, so an explicit `target_language` is passed through to the library,
+which knows what it accepts.
+
+In `verbose_json`, `language` is the language of the text that came back: the
+requested target, or the model's single advertised target when the request
+named none, and `unknown` when neither says — which is what a model that
+advertises no targets at all (whisper, which always produces English) reports
+for a request that named none. It is never the detected source language, which
+for a translation would label the answer wrongly.
+
+```sh
+curl -s -H "Authorization: Bearer secret" \
+  -F file=@speech.ogg \
+  http://127.0.0.1:8010/v1/audio/translations
 ```
 
 #### Upload size and memory

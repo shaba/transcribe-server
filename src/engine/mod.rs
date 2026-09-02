@@ -6,8 +6,33 @@ pub mod transcribe_cpp;
 pub enum EngineError {
     #[error("unknown model: {0}")]
     UnknownModel(String),
+    /// The request asked the model for something it cannot do at all, as
+    /// opposed to a knob it merely has no runtime switch for. Caller error,
+    /// not a server fault.
+    #[error("{0}")]
+    Unsupported(String),
     #[error("transcription failed: {0}")]
     Failed(String),
+}
+
+/// What the model should do with the audio.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Task {
+    /// Transcribe speech in its source language.
+    #[default]
+    Transcribe,
+    /// Translate speech into `TranscribeOptions::target_language`.
+    Translate,
+}
+
+impl Task {
+    /// The value the OpenAI `verbose_json` body reports as `task`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Task::Transcribe => "transcribe",
+            Task::Translate => "translate",
+        }
+    }
 }
 
 /// One timed row of a transcript - a segment or a word. Times are seconds
@@ -64,8 +89,14 @@ impl Transcript {
 pub struct TranscribeOptions {
     /// Request alias, or None for the default (first) model.
     pub model: Option<String>,
-    /// Language hint, or None to let the model decide.
+    /// Transcribe the speech or translate it.
+    pub task: Task,
+    /// Language hint for the audio, or None to let the model decide.
     pub language: Option<String>,
+    /// Language to translate into; only meaningful for [`Task::Translate`],
+    /// where None leaves the choice to the model (whisper only ever produces
+    /// English).
+    pub target_language: Option<String>,
     /// Punctuation and capitalization.
     pub pnc: Option<bool>,
     /// Inverse text normalization ("twenty five" -> "25").
@@ -94,6 +125,56 @@ pub struct ModelInfo {
     /// goes straight into JSON: an f32 widened on the way out turns 12345 ms
     /// into 12.345000267028809.
     pub max_audio_sec: Option<f64>,
+}
+
+impl ModelInfo {
+    /// Why this model cannot serve this translation, if it cannot.
+    ///
+    /// The rule lives here, next to the fields it reads, because two layers
+    /// apply it: the HTTP handler as a cheap pre-check before decoding an
+    /// upload, and the engine as the authority right before the run. Two
+    /// copies of it would eventually disagree, and the subtle half -- that a
+    /// model advertising no targets has not claimed it has none -- is exactly
+    /// the half someone would get wrong.
+    ///
+    /// `named` is how the caller wants the model spelled in the message: the
+    /// HTTP layer says which alias resolved to it, the engine just names it.
+    pub fn translation_refusal(&self, named: &str, target: Option<&str>) -> Option<String> {
+        if !self.supports_translate {
+            return Some(format!("{named} cannot translate"));
+        }
+        let target = target?;
+        let targets = &self.translate_target_languages;
+        // An empty list is an information gap, not a claim of no targets, so
+        // the request goes through and the library decides.
+        if targets.is_empty() || targets.iter().any(|l| language_eq(l, target)) {
+            return None;
+        }
+        Some(format!(
+            "{named} cannot translate into '{target}' (supported: {})",
+            targets.join(", ")
+        ))
+    }
+}
+
+impl ModelInfo {
+    /// The model's own spelling of `target`, when it lists one that names the
+    /// same language. The library takes a short language code and decides what
+    /// it accepts; handing it the caller's capitalization and spacing is
+    /// asking it to reject something we just accepted.
+    pub fn canonical_translate_target<'a>(&'a self, target: &'a str) -> &'a str {
+        self.translate_target_languages
+            .iter()
+            .find(|l| language_eq(l, target))
+            .map_or_else(|| target.trim(), String::as_str)
+    }
+}
+
+/// Compare two language codes the way a caller would expect: `EN` and ` en `
+/// name the same language as `en`. Codes are ASCII, so this is not a Unicode
+/// case-folding problem.
+pub fn language_eq(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
 }
 
 pub trait SttEngine: Send + Sync {
