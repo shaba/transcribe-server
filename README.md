@@ -70,14 +70,22 @@ cargo build --release --features engine-transcribe,transcribe-cpp/cuda
 This requires the CUDA toolkit at build time. At runtime the backend is
 auto-selected; `--no-gpu` forces CPU.
 
+The link is static and self-contained by default. Two upstream features change
+that posture: `transcribe-cpp/shared` links a shared `libtranscribe`, and
+`transcribe-cpp/dynamic-backends` (implies `shared`) additionally builds each
+ggml compute backend as a runtime-loaded module. The server registers those
+modules itself at startup (`init_backends_default()`), which is a no-op in a
+static build, so both postures work without a code change; a shared posture
+does need the libraries on the loader path at runtime.
+
 #### Mode 2 — patched/bundled checkout (`[patch.crates-io]`)
 
 The same source build as mode 1, but the crates come from a git or local
 checkout of transcribe.cpp instead of crates.io. Use this to pick up
-unreleased upstream fixes — for example `TRANSCRIBE_DIR` support (mode 3)
-until it lands in a crates.io release. Uncomment and adapt ONE of the two
-variants from the example block at the bottom of `Cargo.toml` (uncommenting
-both is invalid TOML — duplicate keys):
+upstream fixes that are not in a crates.io release yet, or to build against a
+working copy of the library. Uncomment and adapt ONE of the two variants from
+the example block at the bottom of `Cargo.toml` (uncommenting both is invalid
+TOML — duplicate keys):
 
 ```toml
 [patch.crates-io]
@@ -96,11 +104,10 @@ transcribe-cpp-sys = { path = "/path/to/transcribe.cpp" }
 ```
 
 A patch only applies when the patched version satisfies the `[dependencies]`
-requirement. The current upstream checkout is 0.2.0 while this project
-requires `^0.1.3`, so also bump the requirement to
-`transcribe-cpp = { version = "0.2.0", optional = true }` — otherwise cargo
-warns `patch ... was not used in the crate graph` and silently keeps the
-crates.io version. The server compiles against the 0.2.0 wrapper unmodified.
+requirement (currently `^0.2.3`). If the checkout carries an older or a
+semver-incompatible version, bump the requirement in `Cargo.toml` to match —
+otherwise cargo warns `patch ... was not used in the crate graph` and silently
+keeps the crates.io version.
 
 #### Mode 3 — system/prebuilt prefix (`TRANSCRIBE_DIR`)
 
@@ -136,10 +143,8 @@ Notes:
   the `Environment=LD_LIBRARY_PATH=...` line in
   `packaging/transcribe-server@.service`. Static prefixes (the upstream
   default) need nothing at runtime.
-- `TRANSCRIBE_DIR` support is not in the crates.io release yet
-  (`transcribe-cpp-sys` 0.1.3 predates it): until upstream releases it, mode
-  3 additionally requires the mode 2 patch pointing at a checkout that
-  contains it (upstream branch `rust-sys-system-prefix`).
+- `TRANSCRIBE_DIR` is supported by the crates.io release since
+  `transcribe-cpp-sys` 0.2.3, so mode 3 no longer needs the mode 2 patch.
 
 ## Running
 
