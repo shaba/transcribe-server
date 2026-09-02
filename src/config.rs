@@ -75,6 +75,22 @@ pub struct Config {
     #[arg(long, env = "TRANSCRIBE_NO_GPU")]
     pub no_gpu: bool,
 
+    /// Select an exact compute device by registry index (see --list-devices).
+    // Indices come from transcribe-cpp's process-local device registry, which
+    // is only populated after backend registration; unset keeps today's
+    // automatic backend policy (Backend::Auto, or Backend::Cpu with --no-gpu).
+    //
+    // Deliberately the one flag with no environment variable: the registry is
+    // rebuilt per process and per backend build, so an index that persists in
+    // an env file outlives its meaning and would silently bind a model to a
+    // device nobody chose.
+    #[arg(long)]
+    pub device: Option<usize>,
+
+    /// Print the enumerated compute devices and exit, without loading a model
+    #[arg(long)]
+    pub list_devices: bool,
+
     /// Inference engine to use
     // Hidden alternative value "fake" (test engine) is accepted but not advertised.
     #[arg(long, default_value = "transcribe", env = "TRANSCRIBE_ENGINE")]
@@ -187,6 +203,8 @@ mod tests {
         assert!(!cfg.verbose);
         assert!(cfg.pnc.is_none());
         assert!(cfg.itn.is_none());
+        assert!(cfg.device.is_none());
+        assert!(!cfg.list_devices);
     }
 
     #[test]
@@ -215,6 +233,26 @@ mod tests {
         assert_eq!(cfg.itn, Some(true));
         let err = Config::try_parse_from(["ts", "--pnc", "maybe"]).unwrap_err();
         assert!(err.to_string().contains("expected on or off"), "{err}");
+    }
+
+    /// Registry indices are process-local, so --device must stay a flag: an
+    /// env var invites it into the env files the systemd unit reads.
+    #[test]
+    fn device_flag_parses_index_and_has_no_env_var() {
+        let cfg = Config::try_parse_from(["ts", "--device", "1"]).unwrap();
+        assert_eq!(cfg.device, Some(1));
+        unsafe { std::env::set_var("TRANSCRIBE_DEVICE", "3") };
+        let cfg = Config::try_parse_from(["ts"]).unwrap();
+        unsafe { std::env::remove_var("TRANSCRIBE_DEVICE") };
+        assert!(
+            cfg.device.is_none(),
+            "--device must not read the environment"
+        );
+
+        let cfg = Config::try_parse_from(["ts", "--list-devices"]).unwrap();
+        assert!(cfg.list_devices);
+        // --list-devices must not require -m: no model is fine at parse time.
+        assert!(cfg.model.is_empty());
     }
 
     /// The limit is there to bound memory, but it must not reject the

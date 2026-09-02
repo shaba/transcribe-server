@@ -14,7 +14,12 @@ fn main() -> ExitCode {
     let cfg = Config::parse();
     init_tracing(cfg.verbose);
     init_native_logging();
-    match run(cfg) {
+    let outcome = if cfg.list_devices {
+        list_devices()
+    } else {
+        run(cfg)
+    };
+    match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             tracing::error!("{message}");
@@ -29,6 +34,25 @@ fn main() -> ExitCode {
 fn init_native_logging() {
     #[cfg(feature = "engine-transcribe")]
     transcribe_server::engine::transcribe_cpp::init_logging();
+}
+
+/// `--list-devices`: print the enumerated compute devices and exit, without
+/// loading a model. Works with or without `-m`, since it never builds an
+/// engine. All transcribe-cpp-crate-specific code stays in
+/// `engine::transcribe_cpp`; this is the one helper it exposes for main.rs.
+fn list_devices() -> Result<(), String> {
+    #[cfg(feature = "engine-transcribe")]
+    {
+        transcribe_server::engine::transcribe_cpp::print_devices().map_err(|e| e.to_string())
+    }
+    #[cfg(not(feature = "engine-transcribe"))]
+    {
+        Err(
+            "--list-devices needs the engine-transcribe feature; rebuild with \
+             --features engine-transcribe"
+                .to_string(),
+        )
+    }
 }
 
 /// RUST_LOG overrides everything; otherwise -v selects debug, default info.
@@ -93,6 +117,7 @@ fn build_engine(cfg: &Config) -> Result<Arc<dyn SttEngine>, String> {
                     &cfg.model_specs(),
                     cfg.no_gpu,
                     cfg.threads,
+                    cfg.device,
                 )
                 .map_err(|e| e.to_string())?;
                 Ok(Arc::new(engine))

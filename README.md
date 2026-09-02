@@ -68,7 +68,12 @@ cargo build --release --features engine-transcribe,transcribe-cpp/cuda
 ```
 
 This requires the CUDA toolkit at build time. At runtime the backend is
-auto-selected; `--no-gpu` forces CPU.
+auto-selected; `--no-gpu` forces CPU. To pin a specific device instead of the
+automatic policy, run `--list-devices` and pass the index back via `--device`.
+Device indices come from transcribe-cpp's compute-device registry, which is
+rebuilt every process start: an index is only valid for that one process and
+that one backend build (CPU-only vs. CUDA-enabled), never assume it carries
+over across restarts or machines.
 
 The link is static and self-contained by default. Two upstream features change
 that posture: `transcribe-cpp/shared` links a shared `libtranscribe`, and
@@ -179,6 +184,8 @@ Every flag can also be set through its environment variable (flag wins).
 | `--pnc` | `TRANSCRIBE_PNC` | model default | Punctuation and capitalization: `on` or `off` |
 | `--itn` | `TRANSCRIBE_ITN` | model default | Inverse text normalization ("twenty five" -> "25"): `on` or `off` |
 | `--no-gpu` | `TRANSCRIBE_NO_GPU` | off | Disable GPU inference |
+| `--device` | (none) | (none) | Load models on this exact compute device index (see `--list-devices`). Flag only, no environment variable: indices are process-local (see "Linking modes") and must not outlive the process in a config file |
+| `--list-devices` | (none) | off | Print the enumerated compute devices and exit, without loading a model |
 | `--engine` | `TRANSCRIBE_ENGINE` | `transcribe` | Inference engine (`transcribe`, or `fake` for testing) |
 | `-v`, `--verbose` | `TRANSCRIBE_VERBOSE` | off | Verbose (debug) logging |
 

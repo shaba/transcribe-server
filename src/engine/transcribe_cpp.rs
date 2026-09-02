@@ -25,8 +25,8 @@ use std::sync::{Arc, Mutex};
 
 use transcribe_cpp::Task as CppTask;
 use transcribe_cpp::{
-    Backend, Feature, Itn, Model, ModelOptions, Pnc, RunOptions, Session, SessionOptions,
-    init_backends_default,
+    Backend, DeviceType, Feature, Itn, Model, ModelOptions, Pnc, RunOptions, Session,
+    SessionOptions, init_backends_default,
 };
 
 use crate::config::ModelSpec;
@@ -57,6 +57,7 @@ impl TranscribeCppEngine {
         specs: &[ModelSpec],
         no_gpu: bool,
         threads: Option<usize>,
+        device_index: Option<usize>,
     ) -> Result<Self, EngineError> {
         if specs.is_empty() {
             return Err(EngineError::Failed(
@@ -66,10 +67,7 @@ impl TranscribeCppEngine {
 
         Self::init_backends()?;
 
-        let model_options = ModelOptions {
-            backend: if no_gpu { Backend::Cpu } else { Backend::Auto },
-            ..ModelOptions::default()
-        };
+        let model_options = Self::resolve_model_options(no_gpu, device_index)?;
         let session_options = SessionOptions {
             // 0 = library default thread count.
             n_threads: threads.map_or(0, |t| i32::try_from(t).unwrap_or(i32::MAX)),
@@ -106,17 +104,109 @@ impl TranscribeCppEngine {
     }
 
     /// Register the ggml backend modules, once per process, before any model
-    /// load. Idempotent in the library, so calling it again (a second engine,
-    /// a test) is harmless. The error is reported with the device count so a
-    /// misconfigured module directory is obvious from the log line alone.
+    /// load or device enumeration. The library is idempotent, but registration
+    /// is documented as startup-only and must not race enumeration, so the
+    /// `Once` is what makes concurrent callers (two engines, parallel tests)
+    /// safe rather than merely tidy. The error is reported with the device
+    /// count so a misconfigured module directory is obvious from the log line
+    /// alone.
     fn init_backends() -> Result<(), EngineError> {
+        // The outcome is cached, not just the call: a `Once` hands the error
+        // to whoever ran the closure and `Ok(())` to everyone who raced it,
+        // and that second caller would then load a model into a process with
+        // no backend registered and get the bare "backend error (status 8)"
+        // this exists to prevent.
+        static BACKENDS: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+        BACKENDS
+            .get_or_init(Self::register_backends)
+            .clone()
+            .map_err(EngineError::Failed)
+    }
+
+    fn register_backends() -> Result<(), String> {
         init_backends_default().map_err(|e| {
-            EngineError::Failed(format!(
+            format!(
                 "registering ggml backend modules: {e} ({} compute device(s) available); \
                  a dynamic-backend libtranscribe needs its backend modules installed \
                  where the build expects them",
                 transcribe_cpp::device_count()
-            ))
+            )
+        })
+    }
+
+    /// Turn `--no-gpu` / `--device` into `ModelOptions`. Without `--device` the
+    /// backend policy is unchanged (`Backend::Auto`, or `Backend::Cpu` under
+    /// `--no-gpu`).
+    ///
+    /// With a device and no `--no-gpu`, the backend stays `Auto`, which
+    /// upstream accepts alongside an exact CPU, GPU or integrated-GPU handle
+    /// and resolves to that device with no fallback. Naming a backend per
+    /// device kind instead would only duplicate what the handle already says,
+    /// and would have to keep pace with every kind the registry can report
+    /// (`sycl` has no `Backend` variant at all). `--no-gpu` still pins
+    /// `Backend::Cpu`, which is why it only accepts a CPU device.
+    ///
+    /// An out-of-range index is a hard error, never a silent fall-back to
+    /// automatic selection: upstream treats a NULL device as "automatic", so
+    /// an unchecked bad index would quietly ignore the exact-device request.
+    fn resolve_model_options(
+        no_gpu: bool,
+        device_index: Option<usize>,
+    ) -> Result<ModelOptions, EngineError> {
+        let Some(index) = device_index else {
+            return Ok(ModelOptions {
+                backend: if no_gpu { Backend::Cpu } else { Backend::Auto },
+                ..ModelOptions::default()
+            });
+        };
+
+        let devices = transcribe_cpp::devices();
+        // Matched on the registry index the device carries, not on its
+        // position in this vector: enumeration skips slots it cannot query, so
+        // the two differ exactly when something is wrong -- and picking by
+        // position would then load a device the operator did not ask for.
+        let device = devices
+            .iter()
+            .find(|d| d.index == Some(index))
+            .cloned()
+            .ok_or_else(|| {
+                let valid: Vec<String> = devices
+                    .iter()
+                    .filter_map(|d| d.index.map(|i| i.to_string()))
+                    .collect();
+                EngineError::Failed(format!(
+                    "--device {index} is not a registered compute device; \
+                     valid indices: {} (see --list-devices)",
+                    if valid.is_empty() {
+                        "none".to_string()
+                    } else {
+                        valid.join(", ")
+                    }
+                ))
+            })?;
+
+        // ACCEL devices (BLAS, AMX) cannot be a primary device upstream; they
+        // are layered onto the CPU by asking for CpuAccel instead.
+        if device.device_type == DeviceType::Accel {
+            return Err(EngineError::Failed(format!(
+                "--device {index} is an accelerator ('{}'), which cannot run a \
+                 model on its own; pick the CPU device instead (see \
+                 --list-devices)",
+                device.name
+            )));
+        }
+        if no_gpu && device.device_type != DeviceType::Cpu {
+            return Err(EngineError::Failed(format!(
+                "--device {index} selects a '{}' device, but --no-gpu forces \
+                 CPU-only inference; drop --no-gpu or pick a CPU device (see \
+                 --list-devices)",
+                device.kind
+            )));
+        }
+
+        Ok(ModelOptions {
+            backend: if no_gpu { Backend::Cpu } else { Backend::Auto },
+            device: Some(device),
         })
     }
 
@@ -224,6 +314,59 @@ fn resolve_itn(requested: Option<bool>, supported: bool) -> Itn {
     }
 }
 
+/// `--list-devices`: enumerate compute devices and print them to stdout, then
+/// return. Registers backend modules first (see [`TranscribeCppEngine::init_backends`])
+/// so the registry is populated the same way a real model load would see it;
+/// no model is loaded. This is the only entry point `src/main.rs` needs, so
+/// crate-specific types stay confined to this module.
+pub fn print_devices() -> Result<(), EngineError> {
+    TranscribeCppEngine::init_backends()?;
+    let devices = transcribe_cpp::devices();
+    if devices.is_empty() {
+        println!("no compute devices registered");
+        return Ok(());
+    }
+    println!(
+        "{:<5} {:<7} {:<8} {:<24} {:>10} {:>10}",
+        "INDEX", "TYPE", "KIND", "NAME", "MEM_TOT", "MEM_FREE"
+    );
+    for device in &devices {
+        println!(
+            "{:<5} {:<7} {:<8} {:<24} {:>10} {:>10}",
+            device
+                .index
+                .map_or_else(|| "?".to_string(), |i| i.to_string()),
+            device_type_label(device.device_type),
+            device.kind,
+            device.name,
+            format_memory(device.memory_total),
+            format_memory(device.memory_free),
+        );
+        if !device.description.is_empty() {
+            println!("      {}", device.description);
+        }
+    }
+    Ok(())
+}
+
+fn device_type_label(device_type: DeviceType) -> &'static str {
+    match device_type {
+        DeviceType::Cpu => "cpu",
+        DeviceType::Gpu => "gpu",
+        DeviceType::Igpu => "igpu",
+        DeviceType::Accel => "accel",
+        DeviceType::Unknown => "unknown",
+    }
+}
+
+fn format_memory(bytes: u64) -> String {
+    if bytes == 0 {
+        "-".to_string()
+    } else {
+        format!("{} MiB", bytes / (1024 * 1024))
+    }
+}
+
 impl SttEngine for TranscribeCppEngine {
     fn transcribe(
         &self,
@@ -326,7 +469,7 @@ mod tests {
     use super::{TranscribeCppEngine, convert, resolve_itn, resolve_pnc};
     use crate::config::ModelSpec;
     use crate::engine::{CancelFlag, SttEngine, TranscribeOptions};
-    use transcribe_cpp::{Itn, Pnc};
+    use transcribe_cpp::{Backend, Itn, Pnc};
 
     #[test]
     fn toggles_apply_only_to_models_that_switch_them() {
@@ -406,7 +549,7 @@ mod tests {
 
     #[test]
     fn load_without_specs_fails() {
-        let err = TranscribeCppEngine::load(&[], true, None)
+        let err = TranscribeCppEngine::load(&[], true, None, None)
             .err()
             .expect("load must fail without specs");
         assert!(err.to_string().contains("no models configured"));
@@ -418,11 +561,74 @@ mod tests {
             alias: "missing".to_string(),
             path: "/nonexistent/model.gguf".into(),
         }];
-        let err = TranscribeCppEngine::load(&specs, true, None)
+        let err = TranscribeCppEngine::load(&specs, true, None, None)
             .err()
             .expect("load must fail for a missing file");
         let msg = err.to_string();
         assert!(msg.contains("missing"), "unexpected error: {msg}");
+    }
+
+    /// An out-of-range --device index must fail outright, never fall back to
+    /// automatic selection: upstream treats a NULL device as "automatic", so
+    /// silently ignoring a bad index would quietly defeat the exact-device
+    /// request. The rejection must also point at --list-devices.
+    #[test]
+    fn load_rejects_out_of_range_device_index() {
+        let specs = [ModelSpec {
+            alias: "missing".to_string(),
+            path: "/nonexistent/model.gguf".into(),
+        }];
+        // Register backends first so device_count() below reflects reality;
+        // load() would do this itself, but the index needs to be computed
+        // to guarantee it is out of range regardless of the environment.
+        let _ = TranscribeCppEngine::init_backends();
+        let bad_index = transcribe_cpp::device_count() + 1000;
+        let err = TranscribeCppEngine::load(&specs, false, None, Some(bad_index))
+            .err()
+            .expect("out-of-range device index must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("not a registered"), "unexpected error: {msg}");
+        assert!(msg.contains("--list-devices"), "unexpected error: {msg}");
+    }
+
+    /// The index is the registry index the device carries, which is what
+    /// --list-devices prints. Enumeration skips slots it cannot query, so a
+    /// position-based lookup would select the wrong device the moment the two
+    /// diverge -- the exact silent mis-selection --device exists to prevent.
+    #[test]
+    fn a_selected_device_is_the_one_that_index_names() {
+        let _ = TranscribeCppEngine::init_backends();
+        let devices = transcribe_cpp::devices();
+        let Some(expected) = devices.first() else {
+            return; // No compute device registered in this environment.
+        };
+        let index = expected.index.expect("enumerated devices carry an index");
+        let options = TranscribeCppEngine::resolve_model_options(false, Some(index))
+            .expect("a listed device must resolve");
+        let selected = options.device.expect("an exact device was requested");
+        assert_eq!(selected.index, Some(index));
+        assert_eq!(selected.name, expected.name);
+        // Auto is what upstream pairs with an exact CPU/GPU/iGPU handle.
+        assert_eq!(options.backend, Backend::Auto);
+    }
+
+    /// --no-gpu means strict CPU, so it can only be combined with a CPU
+    /// device; the two must not silently override each other.
+    #[test]
+    fn no_gpu_keeps_the_cpu_backend_for_a_cpu_device() {
+        let _ = TranscribeCppEngine::init_backends();
+        let devices = transcribe_cpp::devices();
+        let Some(cpu) = devices
+            .iter()
+            .find(|d| d.device_type == transcribe_cpp::DeviceType::Cpu)
+        else {
+            return; // No CPU device registered in this environment.
+        };
+        let index = cpu.index.expect("enumerated devices carry an index");
+        let options = TranscribeCppEngine::resolve_model_options(true, Some(index))
+            .expect("a CPU device must be compatible with --no-gpu");
+        assert_eq!(options.backend, Backend::Cpu);
+        assert!(options.device.is_some());
     }
 
     /// A dynamic-backend libtranscribe registers no compute device until the
@@ -439,7 +645,7 @@ mod tests {
             alias: "missing".to_string(),
             path: "/nonexistent/model.gguf".into(),
         }];
-        let _ = TranscribeCppEngine::load(&specs, true, None);
+        let _ = TranscribeCppEngine::load(&specs, true, None, None);
         assert!(
             transcribe_cpp::device_count() > 0,
             "no compute device registered after load(); backend modules were not loaded"
@@ -458,7 +664,7 @@ mod tests {
             alias: "test".to_string(),
             path: path.into(),
         }];
-        let engine = TranscribeCppEngine::load(&specs, true, None).expect("load model");
+        let engine = TranscribeCppEngine::load(&specs, true, None, None).expect("load model");
         let cancel = CancelFlag::new();
         cancel.cancel();
         let err = engine
@@ -484,7 +690,7 @@ mod tests {
             alias: "test".to_string(),
             path: path.into(),
         }];
-        let engine = TranscribeCppEngine::load(&specs, true, None).expect("load model");
+        let engine = TranscribeCppEngine::load(&specs, true, None, None).expect("load model");
         let models = engine.models();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "test");
