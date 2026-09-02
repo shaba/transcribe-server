@@ -181,6 +181,10 @@ Every flag can also be set through its environment variable (flag wins).
 | `-v`, `--verbose` | `TRANSCRIBE_VERBOSE` | off | Verbose (debug) logging |
 
 Logging uses `tracing`; `RUST_LOG` overrides the level chosen by `-v`.
+Diagnostics from the native library (transcribe.cpp and ggml) are routed
+into the same subscriber under the `transcribe_cpp` target, so
+`RUST_LOG=info,transcribe_cpp=warn` keeps the model-load chatter out of the
+server log.
 
 ## API
 

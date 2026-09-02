@@ -13,6 +13,7 @@ use transcribe_server::server::{AppState, build_router};
 fn main() -> ExitCode {
     let cfg = Config::parse();
     init_tracing(cfg.verbose);
+    init_native_logging();
     match run(cfg) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
@@ -20,6 +21,14 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Send the native library's diagnostics through the subscriber installed
+/// above, so they carry a level and RUST_LOG can filter them. A no-op without
+/// the engine, which is the only thing that has a native library to quiet.
+fn init_native_logging() {
+    #[cfg(feature = "engine-transcribe")]
+    transcribe_server::engine::transcribe_cpp::init_logging();
 }
 
 /// RUST_LOG overrides everything; otherwise -v selects debug, default info.

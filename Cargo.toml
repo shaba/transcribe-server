@@ -22,7 +22,12 @@ tempfile = "3.27.0"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["full"] }
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# tracing-log is a default feature, named explicitly because it is
+# load-bearing: it installs the log-to-tracing bridge that carries the
+# native library's diagnostics (see src/engine/transcribe_cpp.rs). Without
+# it they vanish silently -- the library's own stderr sink is already
+# displaced by then, and nothing fails to compile.
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "tracing-log"] }
 transcribe-cpp = { version = "0.2.3", optional = true }
 
 [dev-dependencies]

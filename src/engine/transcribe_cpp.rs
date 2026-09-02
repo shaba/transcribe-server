@@ -16,7 +16,10 @@
 //! is the portable way to do that: it is a no-op returning `Ok(())` in a
 //! compiled-in build, and in a dynamic build it loads the modules from the
 //! directory the build pinned (or, failing that, from the directory holding
-//! libtranscribe itself). See [`Self::init_backends`].
+//! libtranscribe itself). `TranscribeCppEngine::load` does that registration.
+//!
+//! Logging: `init_logging` redirects the library's own stderr sink into
+//! `tracing`; `main` calls it once at startup.
 
 use std::sync::Mutex;
 
@@ -146,6 +149,25 @@ fn convert(transcript: transcribe_cpp::Transcript) -> Transcript {
                 .map(|w| (w.t0_ms, w.t1_ms, w.text)),
         ),
     }
+}
+
+/// Route libtranscribe and ggml diagnostics into `tracing` instead of the
+/// library's own stderr sink, once per process. The crate logs through the
+/// `log` facade and `tracing-subscriber` installs the log-to-tracing bridge,
+/// so the lines arrive under the `transcribe_cpp` target and `RUST_LOG` can
+/// filter them (`RUST_LOG=transcribe_cpp=warn` quiets the model-load chatter).
+///
+/// Called from `main` next to the subscriber setup rather than from
+/// [`TranscribeCppEngine::load`]: displacing the library's stderr sink is only
+/// an improvement where a subscriber exists to receive the messages, and in a
+/// process without one -- a test binary, say -- `log` drops them entirely,
+/// which would hide exactly the diagnostics a failing model load needs.
+///
+/// `transcribe_log_set` is a process-global the library documents as
+/// once-at-startup, hence the `Once`.
+pub fn init_logging() {
+    static LOGGING: std::sync::Once = std::sync::Once::new();
+    LOGGING.call_once(transcribe_cpp::init_logging);
 }
 
 impl SttEngine for TranscribeCppEngine {
