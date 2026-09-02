@@ -97,10 +97,15 @@ async fn run_session(socket: &mut WebSocket, state: &AppState) -> SessionEnd {
                         "odd-length binary frame: expected whole PCM16LE samples".to_string(),
                     );
                 }
+                // as_chunks rather than chunks_exact: the odd byte is already
+                // rejected above, so the remainder is empty, and the array
+                // chunks go straight into from_le_bytes without re-indexing.
                 buffer.extend(
                     bytes
-                        .chunks_exact(2)
-                        .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0),
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|sample| f32::from(i16::from_le_bytes(*sample)) / 32768.0),
                 );
                 // Full window buffered: drain at the chunker's first cut
                 // (a silence near the window end when there is one).
