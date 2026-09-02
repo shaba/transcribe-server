@@ -21,7 +21,7 @@
 //! Logging: `init_logging` redirects the library's own stderr sink into
 //! `tracing`; `main` calls it once at startup.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use transcribe_cpp::Task as CppTask;
 use transcribe_cpp::{
@@ -31,7 +31,7 @@ use transcribe_cpp::{
 
 use crate::config::ModelSpec;
 use crate::engine::{
-    EngineError, ModelInfo, SttEngine, Task, TimedSpan, TranscribeOptions, Transcript,
+    CancelFlag, EngineError, ModelInfo, SttEngine, Task, TimedSpan, TranscribeOptions, Transcript,
 };
 
 struct LoadedModel {
@@ -229,6 +229,7 @@ impl SttEngine for TranscribeCppEngine {
         &self,
         pcm: &[f32],
         request: &TranscribeOptions,
+        cancel: &CancelFlag,
     ) -> Result<Transcript, EngineError> {
         let entry = self.resolve(request.model.as_deref());
         // Probed per call rather than cached at load: the probe is a plain
@@ -275,10 +276,32 @@ impl SttEngine for TranscribeCppEngine {
             .session
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        session
-            .run(pcm, &options)
-            .map(convert)
-            .map_err(|e| EngineError::Failed(format!("model '{}': {e}", entry.alias)))
+        // run() blocks for the whole inference, so the only way to stop it is
+        // the library's abort callback, polled between decode steps. A token
+        // per call, cleared after: a token left installed would let a later
+        // cancel abort an unrelated run on this session. (Families that do not
+        // honor the callback simply run to completion; the library reports
+        // that as Feature::Cancellation.)
+        let token = transcribe_cpp::CancelToken::new();
+        session.set_cancel_token(&token);
+        let guard = cancel.on_cancel(Arc::new(move || token.cancel()));
+        // A cancel that landed while this call was being set up must be seen
+        // here: the caller is already gone, and starting the run would burn
+        // the engine slot on an answer nobody reads.
+        let result = if cancel.is_cancelled() {
+            Err(transcribe_cpp::Error::Aborted {
+                message: "cancelled before the run started".to_string(),
+                partial: None,
+            })
+        } else {
+            session.run(pcm, &options)
+        };
+        drop(guard);
+        session.clear_cancel_token();
+        result.map(convert).map_err(|e| match e {
+            transcribe_cpp::Error::Aborted { .. } => EngineError::Cancelled,
+            other => EngineError::Failed(format!("model '{}': {other}", entry.alias)),
+        })
     }
 
     fn models(&self) -> Vec<ModelInfo> {
@@ -302,7 +325,7 @@ impl SttEngine for TranscribeCppEngine {
 mod tests {
     use super::{TranscribeCppEngine, convert, resolve_itn, resolve_pnc};
     use crate::config::ModelSpec;
-    use crate::engine::{SttEngine, TranscribeOptions};
+    use crate::engine::{CancelFlag, SttEngine, TranscribeOptions};
     use transcribe_cpp::{Itn, Pnc};
 
     #[test]
@@ -424,6 +447,33 @@ mod tests {
         TranscribeCppEngine::init_backends().expect("init_backends must be idempotent");
     }
 
+    /// A cancel that arrives before the run starts must be honored without
+    /// touching the model: with a real model loaded this is the path a client
+    /// that hangs up during the queue wait takes.
+    #[test]
+    #[ignore = "needs TS_TEST_MODEL pointing at a real GGUF model"]
+    fn test_real_model_cancelled_before_run() {
+        let path = std::env::var("TS_TEST_MODEL").expect("TS_TEST_MODEL not set");
+        let specs = [ModelSpec {
+            alias: "test".to_string(),
+            path: path.into(),
+        }];
+        let engine = TranscribeCppEngine::load(&specs, true, None).expect("load model");
+        let cancel = CancelFlag::new();
+        cancel.cancel();
+        let err = engine
+            .transcribe(
+                &vec![0.0f32; 16_000],
+                &TranscribeOptions::default(),
+                &cancel,
+            )
+            .expect_err("a cancelled call must not transcribe");
+        assert!(
+            matches!(err, crate::engine::EngineError::Cancelled),
+            "{err}"
+        );
+    }
+
     /// Real-model smoke test: TS_TEST_MODEL=/path/to/model.gguf cargo test \
     ///   --features engine-transcribe -- --ignored
     #[test]
@@ -446,12 +496,13 @@ mod tests {
             model: Some(alias.to_string()),
             ..TranscribeOptions::default()
         };
+        let cancel = CancelFlag::new();
         let result = engine
-            .transcribe(&pcm, &options("test"))
+            .transcribe(&pcm, &options("test"), &cancel)
             .expect("transcribe silence");
         // Unknown alias falls back to the default (first) model.
         let result2 = engine
-            .transcribe(&pcm, &options("no-such-alias"))
+            .transcribe(&pcm, &options("no-such-alias"), &cancel)
             .expect("transcribe with unknown alias");
         assert_eq!(result.text.is_empty(), result2.text.is_empty());
         // Timestamp rows, when the family produces them, stay inside the audio.

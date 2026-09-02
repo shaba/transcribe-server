@@ -1,6 +1,9 @@
+pub mod cancel;
 pub mod fake;
 #[cfg(feature = "engine-transcribe")]
 pub mod transcribe_cpp;
+
+pub use cancel::CancelFlag;
 
 #[derive(thiserror::Error, Debug)]
 pub enum EngineError {
@@ -11,6 +14,10 @@ pub enum EngineError {
     /// not a server fault.
     #[error("{0}")]
     Unsupported(String),
+    /// The caller went away and the run was aborted on purpose. Not a
+    /// failure: nobody is left to read the answer.
+    #[error("transcription cancelled")]
+    Cancelled,
     #[error("transcription failed: {0}")]
     Failed(String),
 }
@@ -186,6 +193,7 @@ pub trait SttEngine: Send + Sync {
         &self,
         pcm: &[f32],
         options: &TranscribeOptions,
+        cancel: &CancelFlag,
     ) -> Result<Transcript, EngineError>;
     /// Every loaded model, in configuration order: the first one is the
     /// default the server falls back to.

@@ -42,6 +42,16 @@ impl ApiError {
         }
     }
 
+    /// The caller closed the connection before the answer was ready. Nginx's
+    /// 499: no standard status says it, and no client ever reads this one.
+    pub fn cancelled() -> Self {
+        Self {
+            status: StatusCode::from_u16(499).expect("499 is a valid status code"),
+            message: "client closed the request".to_string(),
+            error_type: "server_error",
+        }
+    }
+
     pub fn internal(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,

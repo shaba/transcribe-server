@@ -1,4 +1,6 @@
-use super::{EngineError, ModelInfo, SttEngine, Task, TimedSpan, TranscribeOptions, Transcript};
+use super::{
+    CancelFlag, EngineError, ModelInfo, SttEngine, Task, TimedSpan, TranscribeOptions, Transcript,
+};
 use crate::audio::samples_to_sec;
 
 pub struct FakeEngine;
@@ -18,7 +20,11 @@ impl SttEngine for FakeEngine {
         &self,
         pcm: &[f32],
         options: &TranscribeOptions,
+        cancel: &CancelFlag,
     ) -> Result<Transcript, EngineError> {
+        if cancel.is_cancelled() {
+            return Err(EngineError::Cancelled);
+        }
         let mut text = format!(
             "fake:{}:{}",
             options.model.as_deref().unwrap_or("default"),
@@ -86,7 +92,7 @@ fn on_off(value: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::FakeEngine;
-    use crate::engine::{SttEngine, TranscribeOptions};
+    use crate::engine::{CancelFlag, SttEngine, TranscribeOptions};
 
     fn options(model: Option<&str>, language: Option<&str>) -> TranscribeOptions {
         TranscribeOptions {
@@ -101,7 +107,7 @@ mod tests {
         let engine = FakeEngine;
         let pcm = [0.0f32, 0.1, -0.1];
         let result = engine
-            .transcribe(&pcm, &TranscribeOptions::default())
+            .transcribe(&pcm, &TranscribeOptions::default(), &CancelFlag::new())
             .expect("transcribe ok");
         assert_eq!(result.text, "fake:default:3");
         assert!(result.language.is_none());
@@ -115,13 +121,17 @@ mod tests {
             itn: Some(true),
             ..options(Some("ru"), None)
         };
-        let result = engine.transcribe(&[], &both).expect("transcribe ok");
+        let result = engine
+            .transcribe(&[], &both, &CancelFlag::new())
+            .expect("transcribe ok");
         assert_eq!(result.text, "fake:ru:0:pnc=off:itn=on");
         let one = TranscribeOptions {
             pnc: Some(true),
             ..TranscribeOptions::default()
         };
-        let result = engine.transcribe(&[], &one).expect("transcribe ok");
+        let result = engine
+            .transcribe(&[], &one, &CancelFlag::new())
+            .expect("transcribe ok");
         assert_eq!(result.text, "fake:default:0:pnc=on");
     }
 
@@ -129,7 +139,7 @@ mod tests {
     fn transcribe_with_model_and_empty_pcm() {
         let engine = FakeEngine;
         let result = engine
-            .transcribe(&[], &options(Some("ru"), Some("ru")))
+            .transcribe(&[], &options(Some("ru"), Some("ru")), &CancelFlag::new())
             .expect("transcribe ok");
         assert_eq!(result.text, "fake:ru:0");
         assert_eq!(result.language.as_deref(), Some("ru"));
@@ -148,7 +158,7 @@ mod tests {
         let engine = FakeEngine;
         let pcm = vec![0.0f32; 32_000]; // 2 s at 16 kHz
         let result = engine
-            .transcribe(&pcm, &TranscribeOptions::default())
+            .transcribe(&pcm, &TranscribeOptions::default(), &CancelFlag::new())
             .expect("transcribe ok");
         assert_eq!(result.segments.len(), 1);
         assert_eq!(result.segments[0].start, 0.0);
@@ -161,7 +171,7 @@ mod tests {
         let engine = FakeEngine;
         let pcm = vec![0.0f32; 16_000]; // 1 s at 16 kHz
         let result = engine
-            .transcribe(&pcm, &TranscribeOptions::default())
+            .transcribe(&pcm, &TranscribeOptions::default(), &CancelFlag::new())
             .expect("transcribe ok");
         assert_eq!(result.words.len(), 3, "{:?}", result.words);
         assert_eq!(result.words[0].start, 0.0);
@@ -185,6 +195,16 @@ mod tests {
     fn backend_is_fake() {
         let engine = FakeEngine;
         assert_eq!(engine.backend(), "fake");
+    }
+
+    #[test]
+    fn a_cancelled_call_does_no_work() {
+        let cancel = CancelFlag::new();
+        cancel.cancel();
+        let err = FakeEngine
+            .transcribe(&[0.0; 16], &TranscribeOptions::default(), &cancel)
+            .expect_err("a cancelled call must not transcribe");
+        assert!(matches!(err, crate::engine::EngineError::Cancelled));
     }
 
     #[test]

@@ -99,7 +99,7 @@ pub fn build_router(state: AppState, keys: AuthKeys) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{EngineError, ModelInfo, TranscribeOptions, Transcript};
+    use crate::engine::{CancelFlag, EngineError, ModelInfo, TranscribeOptions, Transcript};
     use clap::Parser;
 
     /// Engine reporting exactly the model limits a test asks it for.
@@ -110,6 +110,7 @@ mod tests {
             &self,
             _pcm: &[f32],
             _options: &TranscribeOptions,
+            _cancel: &CancelFlag,
         ) -> Result<Transcript, EngineError> {
             Ok(Transcript::default())
         }

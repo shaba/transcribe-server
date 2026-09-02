@@ -331,6 +331,18 @@ curl -s -H "Authorization: Bearer secret" \
   http://127.0.0.1:8010/v1/audio/translations
 ```
 
+#### Cancellation
+
+A client that hangs up mid-request has its transcription aborted rather than
+finished into a closed connection: the engine slot and the CPU it was holding
+go back to requests that still have someone waiting. This needs the model
+family to honor the library's abort callback; a family that does not runs to
+completion as before.
+
+The WebSocket endpoint aborts the same way when its connection drops, but only
+between chunks -- the chunk being transcribed when the socket closed still
+finishes.
+
 #### Upload size and memory
 
 `--max-upload-mb` defaults to 256. The sizing case is a full meeting or

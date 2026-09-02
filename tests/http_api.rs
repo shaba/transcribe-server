@@ -9,7 +9,9 @@ use clap::Parser;
 use common::{auth_keys, spawn_app, spawn_app_with_cfg, spawn_fake_app};
 use transcribe_server::config::Config;
 use transcribe_server::engine::fake::FakeEngine;
-use transcribe_server::engine::{EngineError, ModelInfo, SttEngine, TranscribeOptions, Transcript};
+use transcribe_server::engine::{
+    CancelFlag, EngineError, ModelInfo, SttEngine, TranscribeOptions, Transcript,
+};
 
 #[tokio::test]
 async fn health_reports_ok_backend_and_models() {
@@ -494,6 +496,86 @@ async fn transcriptions_oversized_body_is_413_with_api_error_shape() {
     );
 }
 
+/// An engine that never finishes on its own, so a test can observe what
+/// happens to a run whose client goes away.
+struct NeverFinishes {
+    /// Set once the engine call has started, so the test knows the request
+    /// reached it before dropping the connection.
+    running: Arc<std::sync::atomic::AtomicBool>,
+    /// Set when the call returns because it was cancelled.
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl SttEngine for NeverFinishes {
+    fn transcribe(
+        &self,
+        _pcm: &[f32],
+        _options: &TranscribeOptions,
+        cancel: &CancelFlag,
+    ) -> Result<Transcript, EngineError> {
+        use std::sync::atomic::Ordering;
+        self.running.store(true, Ordering::SeqCst);
+        // A real engine polls its own abort callback; this stands in for it.
+        for _ in 0..1_000 {
+            if cancel.is_cancelled() {
+                self.cancelled.store(true, Ordering::SeqCst);
+                return Err(EngineError::Cancelled);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        Ok(Transcript::text_only("never reached"))
+    }
+
+    fn models(&self) -> Vec<ModelInfo> {
+        vec![ModelInfo {
+            id: "slow".to_string(),
+            ..ModelInfo::default()
+        }]
+    }
+
+    fn backend(&self) -> String {
+        "slow".to_string()
+    }
+}
+
+/// A blocking engine call outlives the future waiting on it, so a client that
+/// hangs up mid-transcription would otherwise keep a core and the engine slot
+/// busy until the audio ran out.
+#[tokio::test]
+async fn a_dropped_connection_cancels_the_run() {
+    use std::sync::atomic::Ordering;
+
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let engine = Arc::new(NeverFinishes {
+        running: Arc::clone(&running),
+        cancelled: Arc::clone(&cancelled),
+    });
+    let base = spawn_app(engine, auth_keys(&[])).await;
+
+    // The timeout is how the client hangs up: reqwest drops the connection,
+    // and hyper drops the handler future the engine call is hanging off.
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/audio/transcriptions"))
+        .timeout(std::time::Duration::from_millis(300))
+        .multipart(transcription_form(wav_16k_mono(0.1), "a.wav"))
+        .send()
+        .await;
+    assert!(resp.is_err(), "the client was supposed to give up first");
+
+    // Polled rather than asserted outright: the run is still being set up
+    // (multipart, decode, engine slot) when the client's timeout fires, so
+    // "started" and "cancelled" both arrive shortly after, not before.
+    for _ in 0..200 {
+        if cancelled.load(Ordering::SeqCst) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(running.load(Ordering::SeqCst), "the run never started");
+    panic!("the run kept going after the client hung up");
+}
+
 /// An engine reporting exactly the capabilities a test needs.
 struct Capable(ModelInfo);
 
@@ -504,6 +586,7 @@ impl SttEngine for Capable {
         &self,
         _pcm: &[f32],
         options: &TranscribeOptions,
+        _cancel: &CancelFlag,
     ) -> Result<Transcript, EngineError> {
         Ok(Transcript::text_only(format!(
             "text:to={}",
@@ -639,4 +722,78 @@ async fn translations_verbose_json_reports_the_produced_language() {
     let json: serde_json::Value = resp.json().await.expect("JSON body");
     assert_eq!(json["task"], "translate");
     assert_eq!(json["language"], "en");
+}
+
+/// An engine that ignores cancellation and always takes the same time, so a
+/// test can watch how many runs the server lets overlap.
+struct Sluggish {
+    active: Arc<std::sync::atomic::AtomicUsize>,
+    peak: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl SttEngine for Sluggish {
+    fn transcribe(
+        &self,
+        _pcm: &[f32],
+        _options: &TranscribeOptions,
+        _cancel: &CancelFlag,
+    ) -> Result<Transcript, EngineError> {
+        use std::sync::atomic::Ordering;
+        let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(now, Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        Ok(Transcript::text_only("slow"))
+    }
+
+    fn models(&self) -> Vec<ModelInfo> {
+        vec![ModelInfo {
+            id: "slow".to_string(),
+            ..ModelInfo::default()
+        }]
+    }
+
+    fn backend(&self) -> String {
+        "slow".to_string()
+    }
+}
+
+/// --parallel bounds how many runs are in flight, and a client hanging up must
+/// not hand its slot away while the run it paid for is still going: a family
+/// that ignores the abort callback keeps computing, and the next request would
+/// walk past the bound only to queue on the model's own lock instead.
+#[tokio::test]
+async fn an_abandoned_run_keeps_its_engine_slot_until_it_stops() {
+    use std::sync::atomic::Ordering;
+
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let engine = Arc::new(Sluggish {
+        active: Arc::clone(&active),
+        peak: Arc::clone(&peak),
+    });
+    let cfg = Arc::new(Config::try_parse_from(["ts", "--parallel", "1"]).expect("parse config"));
+    let base = spawn_app_with_cfg(engine, auth_keys(&[]), cfg).await;
+
+    // The first client gives up while its run is still going.
+    let abandoned = reqwest::Client::new()
+        .post(format!("{base}/v1/audio/transcriptions"))
+        .timeout(std::time::Duration::from_millis(100))
+        .multipart(transcription_form(wav_16k_mono(0.1), "a.wav"))
+        .send()
+        .await;
+    assert!(
+        abandoned.is_err(),
+        "the client was supposed to give up first"
+    );
+
+    // The second one arrives while that run is still in the engine.
+    let resp =
+        post_transcription(&base, transcription_form(wav_16k_mono(0.1), "b.wav"), None).await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        peak.load(Ordering::SeqCst),
+        1,
+        "--parallel 1 let two runs overlap"
+    );
 }
