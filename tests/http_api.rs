@@ -177,11 +177,12 @@ async fn transcriptions_unparsable_toggle_is_400() {
     assert!(message.contains("pnc"), "unexpected message: {message}");
 }
 
-/// Open WebUI contract: multipart model + file, Bearer auth, no
-/// response_format; response is JSON {"text": ...}. Must never break.
+/// The dictation contract an OpenAI STT client sends: multipart model + file,
+/// Bearer auth, no response_format; response is JSON {"text": ...}. Must
+/// never break.
 #[cfg(feature = "audio-ffmpeg")]
 #[tokio::test]
-async fn owui_contract_webm_multipart_returns_json_text() {
+async fn openai_contract_webm_multipart_returns_json_text() {
     let base = spawn_fake_app(auth_keys(&["k1"])).await;
     let webm = std::fs::read(format!(
         "{}/tests/fixtures/beep.webm",
@@ -347,8 +348,8 @@ async fn transcriptions_verbose_json_timestamps_are_absolute_across_chunks() {
     );
 }
 
-/// Default (no response_format) stays the bare {"text": ...} Open WebUI relies
-/// on: no segments, no words, no duration.
+/// Default (no response_format) stays the bare {"text": ...} an OpenAI STT
+/// client expects: no segments, no words, no duration.
 #[tokio::test]
 async fn transcriptions_default_json_carries_no_timestamps() {
     let base = spawn_fake_app(auth_keys(&[])).await;

@@ -7,15 +7,16 @@ Practical reference for coding agents working in this repository.
 OpenAI-compatible speech-to-text server in Rust on top of the
 [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) library
 (ggml runtime, multiple ASR model families: GigaAM, Whisper, Parakeet, ...).
-Primary consumer: Open WebUI (STT engine "openai", multipart).
+Consumers are OpenAI-API speech-to-text clients (multipart).
 
 Key invariants:
 - The `SttEngine` trait (`src/engine/mod.rs`) isolates the transcribe-cpp
   crate. HTTP code never touches the crate directly.
 - PCM contract everywhere: 16 kHz mono f32 in [-1, 1].
-- The Open WebUI request contract (see README, "Open WebUI") must not break:
-  `POST /v1/audio/transcriptions`, multipart fields `file`/`model`/`language`,
-  no `response_format` -> JSON `{"text": "..."}` response.
+- The OpenAI dictation contract must not break: `POST
+  /v1/audio/transcriptions`, multipart fields `file`/`model`/`language`, no
+  `response_format` -> JSON `{"text": "..."}` response. Name no particular
+  client in code or comments; README may mention one as an example.
 - Audio decoding uses system libav via ffmpeg-next. No subprocess execs.
 
 ## Build and test
