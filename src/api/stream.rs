@@ -22,8 +22,7 @@ use axum::response::Response;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::audio::TARGET_SR;
-use crate::chunk::chunk_ranges;
+use crate::chunk::{first_cut, window_samples};
 use crate::engine::TranscribeOptions;
 use crate::server::AppState;
 
@@ -82,7 +81,7 @@ async fn run_session(socket: &mut WebSocket, state: &AppState) -> SessionEnd {
         itn: start.itn.or(state.cfg.itn),
     });
     let chunk_max_sec = state.chunk_max_sec(options.model.as_deref());
-    let max_samples = ((chunk_max_sec * TARGET_SR as f32) as usize).max(1);
+    let max_samples = window_samples(chunk_max_sec);
 
     let mut buffer: Vec<f32> = Vec::new();
     let mut parts: Vec<String> = Vec::new();
@@ -106,9 +105,7 @@ async fn run_session(socket: &mut WebSocket, state: &AppState) -> SessionEnd {
                 // Full window buffered: drain at the chunker's first cut
                 // (a silence near the window end when there is one).
                 while buffer.len() >= max_samples {
-                    let cut =
-                        chunk_ranges(&buffer, TARGET_SR, chunk_max_sec, state.cfg.vad_threshold)[0]
-                            .end;
+                    let cut = first_cut(&buffer, chunk_max_sec, state.cfg.vad_threshold);
                     let chunk: Vec<f32> = buffer.drain(..cut).collect();
                     let text = match transcribe(state, chunk, &options).await {
                         Ok(text) => text,
@@ -140,7 +137,9 @@ async fn run_session(socket: &mut WebSocket, state: &AppState) -> SessionEnd {
             Err(end) => return end,
         }
     }
-    let frame = json!({"type": "final", "text": crate::api::join_parts(&parts)}).to_string();
+    let frame =
+        json!({"type": "final", "text": crate::api::join_parts(parts.iter().map(String::as_str))})
+            .to_string();
     if socket.send(Message::Text(frame.into())).await.is_err() {
         return SessionEnd::Disconnected;
     }

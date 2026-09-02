@@ -20,11 +20,7 @@ pub(crate) struct Chunk {
 
 /// Chunk texts joined exactly like the `json` and `text` formats join them.
 pub(crate) fn joined_text(chunks: &[Chunk]) -> String {
-    let parts: Vec<String> = chunks
-        .iter()
-        .map(|c| c.transcript.text.clone())
-        .collect::<Vec<_>>();
-    super::join_parts(&parts)
+    super::join_parts(chunks.iter().map(|c| c.transcript.text.as_str()))
 }
 
 /// Build the `verbose_json` body: OpenAI's shape, with `words` present only

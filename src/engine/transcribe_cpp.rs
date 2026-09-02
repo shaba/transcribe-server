@@ -35,7 +35,6 @@ use crate::engine::{
 };
 
 struct LoadedModel {
-    alias: String,
     model: Model,
     session: Mutex<Session>,
     /// Read once at load: the library's capabilities are immutable for a
@@ -94,7 +93,6 @@ impl TranscribeCppEngine {
             );
             let info = model_info(&spec.alias, &model);
             models.push(LoadedModel {
-                alias: spec.alias.clone(),
                 model,
                 session: Mutex::new(session),
                 info,
@@ -215,7 +213,7 @@ impl TranscribeCppEngine {
     /// HTTP layer consults about the model a request will run on.
     fn resolve(&self, alias: Option<&str>) -> &LoadedModel {
         alias
-            .and_then(|a| self.models.iter().find(|m| m.alias == a))
+            .and_then(|a| self.models.iter().find(|m| m.info.id == a))
             .unwrap_or(&self.models[0])
     }
 }
@@ -387,7 +385,7 @@ impl SttEngine for TranscribeCppEngine {
                 // answer cannot change for a loaded model, and rebuilding it
                 // allocates a String per supported language.
                 if let Some(refusal) = entry.info.translation_refusal(
-                    &format!("model '{}'", entry.alias),
+                    &format!("model '{}'", entry.info.id),
                     request.target_language.as_deref(),
                 ) {
                     return Err(EngineError::Unsupported(refusal));
@@ -443,7 +441,7 @@ impl SttEngine for TranscribeCppEngine {
         session.clear_cancel_token();
         result.map(convert).map_err(|e| match e {
             transcribe_cpp::Error::Aborted { .. } => EngineError::Cancelled,
-            other => EngineError::Failed(format!("model '{}': {other}", entry.alias)),
+            other => EngineError::Failed(format!("model '{}': {other}", entry.info.id)),
         })
     }
 

@@ -19,7 +19,7 @@ use serde_json::json;
 use crate::api::error::ApiError;
 use crate::api::exec::transcribe_range;
 use crate::api::verbose::{self, Chunk};
-use crate::audio::{TARGET_SR, decode_to_pcm_16k, samples_to_sec};
+use crate::audio::{decode_to_pcm_16k, samples_to_sec};
 use crate::chunk::chunk_ranges;
 use crate::config::toggle;
 use crate::engine::{ModelInfo, Task, TranscribeOptions};
@@ -156,7 +156,6 @@ async fn handle(
 
     let ranges = chunk_ranges(
         &pcm,
-        TARGET_SR,
         state.chunk_max_sec_for(model_info.as_ref()),
         state.cfg.vad_threshold,
     );

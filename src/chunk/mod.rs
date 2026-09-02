@@ -6,6 +6,8 @@
 
 use std::ops::Range;
 
+use crate::audio::TARGET_SR;
+
 /// Seconds to look back from the end of a full window for a silent frame.
 const SEARCH_BACK_SEC: f32 = 10.0;
 
@@ -16,63 +18,74 @@ const SEARCH_BACK_FRACTION: f32 = 0.4;
 /// Frame length used for energy estimation, in milliseconds.
 const FRAME_MS: usize = 30;
 
-/// Split pcm into ranges each <= max_sec, cutting at the quietest 30 ms frame
-/// inside the last `SEARCH_BACK_SEC`(=10.0) of the window; hard cut if no
-/// silence. pcm.len() <= max samples -> single full range. Ranges cover pcm
-/// without gaps.
+/// Frame length in samples; at least one sample so the scan always advances.
+fn frame_len() -> usize {
+    (TARGET_SR * FRAME_MS / 1000).max(1)
+}
+
+/// Window length in samples, clamped the way the chunker clamps it: a
+/// `max_sec` shorter than one frame is raised to one frame, so every range is
+/// non-empty and the loop always makes progress.
+///
+/// Exposed so a caller buffering audio for the chunker sizes its buffer from
+/// the same number, rather than re-deriving it and drifting.
+pub fn window_samples(max_sec: f32) -> usize {
+    ((max_sec * TARGET_SR as f32) as usize).max(frame_len())
+}
+
+/// End of the first range [`chunk_ranges`] would produce for `pcm`, i.e. where
+/// to cut a buffer that has filled one window. `pcm.len()` when the whole
+/// buffer fits in one window.
 ///
 /// Frame energy = mean(|x|) over 30 ms frames; "silence" = energy below
 /// `vad_threshold`; the minimum-energy silent frame in the search-back window
-/// is the cut point (cut at frame center).
-///
-/// Edge cases: empty pcm -> empty vec; `max_sec` values shorter than one
-/// frame are clamped up to one frame so every range is non-empty and the
-/// loop always makes progress.
-pub fn chunk_ranges(
-    pcm: &[f32],
-    sample_rate: usize,
-    max_sec: f32,
-    vad_threshold: f32,
-) -> Vec<Range<usize>> {
-    if pcm.is_empty() {
-        return Vec::new();
+/// is the cut point (cut at frame center). No silence found means a hard cut
+/// at the window edge.
+pub fn first_cut(pcm: &[f32], max_sec: f32, vad_threshold: f32) -> usize {
+    let max_samples = window_samples(max_sec);
+    if pcm.len() <= max_samples {
+        return pcm.len();
     }
-    let frame_len = (sample_rate * FRAME_MS / 1000).max(1);
-    let max_samples = ((max_sec * sample_rate as f32) as usize).max(frame_len);
+    let frame_len = frame_len();
     // Scaled to the window, not fixed: a model whose own limit is shorter than
     // SEARCH_BACK_SEC would otherwise have its whole window searched, making
     // the quietest frame anywhere in it the cut -- which turns a window that
     // opens with a pause into a chunk of a few frames.
     let search_back =
-        ((SEARCH_BACK_SEC.min(max_sec * SEARCH_BACK_FRACTION)) * sample_rate as f32) as usize;
+        ((SEARCH_BACK_SEC.min(max_sec * SEARCH_BACK_FRACTION)) * TARGET_SR as f32) as usize;
+    let search_start = max_samples.saturating_sub(search_back);
 
+    let mut best: Option<(f32, usize)> = None;
+    let mut pos = search_start;
+    while pos + frame_len <= max_samples {
+        let energy = pcm[pos..pos + frame_len]
+            .iter()
+            .map(|x| x.abs())
+            .sum::<f32>()
+            / frame_len as f32;
+        if energy < vad_threshold && best.is_none_or(|(e, _)| energy < e) {
+            best = Some((energy, pos + frame_len / 2));
+        }
+        pos += frame_len;
+    }
+    match best {
+        // A cut at zero would make no progress, so the window edge wins.
+        Some((_, center)) if center > 0 => center,
+        _ => max_samples,
+    }
+}
+
+/// Split pcm into ranges each <= `max_sec` long, cutting at silence where
+/// there is any (see [`first_cut`]). Ranges cover pcm without gaps; empty pcm
+/// yields no ranges.
+pub fn chunk_ranges(pcm: &[f32], max_sec: f32, vad_threshold: f32) -> Vec<Range<usize>> {
     let mut ranges = Vec::new();
     let mut start = 0usize;
-    while pcm.len() - start > max_samples {
-        let window_end = start + max_samples;
-        let search_start = window_end.saturating_sub(search_back).max(start);
-        // Quietest silent frame in the search-back window, cut at its center.
-        let mut best: Option<(f32, usize)> = None;
-        let mut pos = search_start;
-        while pos + frame_len <= window_end {
-            let energy = pcm[pos..pos + frame_len]
-                .iter()
-                .map(|x| x.abs())
-                .sum::<f32>()
-                / frame_len as f32;
-            if energy < vad_threshold && best.is_none_or(|(e, _)| energy < e) {
-                best = Some((energy, pos + frame_len / 2));
-            }
-            pos += frame_len;
-        }
-        let cut = match best {
-            Some((_, center)) if center > start => center,
-            _ => window_end, // no silence found: hard cut at the window edge
-        };
+    while start < pcm.len() {
+        let cut = start + first_cut(&pcm[start..], max_sec, vad_threshold);
         ranges.push(start..cut);
         start = cut;
     }
-    ranges.push(start..pcm.len());
     ranges
 }
 
@@ -124,7 +137,7 @@ mod tests {
     #[test]
     fn short_input_single_full_range() {
         let pcm = sine(1.0);
-        let ranges = chunk_ranges(&pcm, SR, 25.0, THRESHOLD);
+        let ranges = chunk_ranges(&pcm, 25.0, THRESHOLD);
         assert_eq!(ranges.len(), 1);
         assert_eq!(ranges[0], 0..16000);
     }
@@ -140,7 +153,7 @@ mod tests {
         let max_sec = 25.0;
         let max_samples = (max_sec * SR as f32) as usize;
 
-        let ranges = chunk_ranges(&pcm, SR, max_sec, THRESHOLD);
+        let ranges = chunk_ranges(&pcm, max_sec, THRESHOLD);
         assert_gapless(&ranges, pcm.len());
         assert_eq!(ranges.len(), 3, "expected 3 ranges, got {ranges:?}");
         for r in &ranges {
@@ -161,7 +174,7 @@ mod tests {
         let max_sec = 25.0;
         let max_samples = (max_sec * SR as f32) as usize;
 
-        let ranges = chunk_ranges(&pcm, SR, max_sec, THRESHOLD);
+        let ranges = chunk_ranges(&pcm, max_sec, THRESHOLD);
         assert_gapless(&ranges, pcm.len());
         assert_eq!(ranges.len(), 3);
         assert_eq!(ranges[0], 0..max_samples);
@@ -178,7 +191,7 @@ mod tests {
         let mut pcm = silence(0.3); // a pause right after the window opens
         pcm.extend(sine(9.7));
         let max_sec = 4.0;
-        let ranges = chunk_ranges(&pcm, SR, max_sec, THRESHOLD);
+        let ranges = chunk_ranges(&pcm, max_sec, THRESHOLD);
         let first = ranges[0].len() as f32 / SR as f32;
         assert!(
             first > max_sec * (1.0 - SEARCH_BACK_FRACTION) - 0.1,
@@ -189,13 +202,13 @@ mod tests {
 
     #[test]
     fn empty_pcm_returns_empty_vec() {
-        assert!(chunk_ranges(&[], SR, 25.0, THRESHOLD).is_empty());
+        assert!(chunk_ranges(&[], 25.0, THRESHOLD).is_empty());
     }
 
     #[test]
     fn shorter_than_one_frame_single_range() {
         let pcm = vec![0.1f32; 100]; // < 480 samples (one 30 ms frame at 16k)
-        let ranges = chunk_ranges(&pcm, SR, 25.0, THRESHOLD);
+        let ranges = chunk_ranges(&pcm, 25.0, THRESHOLD);
         assert_eq!(ranges.len(), 1);
         assert_eq!(ranges[0], 0..100);
     }
@@ -203,7 +216,7 @@ mod tests {
     #[test]
     fn non_positive_max_sec_clamped_to_one_frame() {
         let pcm = sine(1.0);
-        let ranges = chunk_ranges(&pcm, SR, 0.0, THRESHOLD);
+        let ranges = chunk_ranges(&pcm, 0.0, THRESHOLD);
         assert_gapless(&ranges, pcm.len());
         // Clamped window is one frame; pure sine has no silence, so hard cuts.
         assert!(ranges.iter().all(|r| r.len() <= SR * FRAME_MS / 1000));
