@@ -1,4 +1,4 @@
-use super::{EngineError, SttEngine, TimedSpan, Transcript};
+use super::{EngineError, SttEngine, TimedSpan, TranscribeOptions, Transcript};
 use crate::audio::samples_to_sec;
 
 pub struct FakeEngine;
@@ -9,13 +9,26 @@ impl SttEngine for FakeEngine {
     /// (including the chunk offsets applied by callers) is exercised without
     /// a real model. The reported language is the requested one: the fake
     /// "detects" whatever it was told.
+    ///
+    /// A toggle the caller set is echoed too (`...:pnc=off`), which is what
+    /// lets the HTTP tests assert that a request field reached the engine.
+    /// An unset toggle adds nothing, so the default text shape is unchanged.
     fn transcribe(
         &self,
         pcm: &[f32],
-        model: Option<&str>,
-        language: Option<&str>,
+        options: &TranscribeOptions,
     ) -> Result<Transcript, EngineError> {
-        let text = format!("fake:{}:{}", model.unwrap_or("default"), pcm.len());
+        let mut text = format!(
+            "fake:{}:{}",
+            options.model.as_deref().unwrap_or("default"),
+            pcm.len()
+        );
+        if let Some(pnc) = options.pnc {
+            text.push_str(&format!(":pnc={}", on_off(pnc)));
+        }
+        if let Some(itn) = options.itn {
+            text.push_str(&format!(":itn={}", on_off(itn)));
+        }
         let duration = samples_to_sec(pcm.len());
         // The fake text carries no spaces, so its colon-separated parts stand
         // in for words: enough rows to catch a word list that is mis-ordered
@@ -38,7 +51,7 @@ impl SttEngine for FakeEngine {
                 text: text.clone(),
             }],
             words,
-            language: language.map(str::to_string),
+            language: options.language.clone(),
             text,
         })
     }
@@ -52,25 +65,57 @@ impl SttEngine for FakeEngine {
     }
 }
 
+fn on_off(value: bool) -> &'static str {
+    if value { "on" } else { "off" }
+}
+
 #[cfg(test)]
 mod tests {
     use super::FakeEngine;
-    use crate::engine::SttEngine;
+    use crate::engine::{SttEngine, TranscribeOptions};
+
+    fn options(model: Option<&str>, language: Option<&str>) -> TranscribeOptions {
+        TranscribeOptions {
+            model: model.map(str::to_string),
+            language: language.map(str::to_string),
+            ..TranscribeOptions::default()
+        }
+    }
 
     #[test]
     fn transcribe_without_model_uses_default() {
         let engine = FakeEngine;
         let pcm = [0.0f32, 0.1, -0.1];
-        let result = engine.transcribe(&pcm, None, None).expect("transcribe ok");
+        let result = engine
+            .transcribe(&pcm, &TranscribeOptions::default())
+            .expect("transcribe ok");
         assert_eq!(result.text, "fake:default:3");
         assert!(result.language.is_none());
+    }
+
+    #[test]
+    fn set_toggles_are_echoed_and_unset_ones_are_not() {
+        let engine = FakeEngine;
+        let both = TranscribeOptions {
+            pnc: Some(false),
+            itn: Some(true),
+            ..options(Some("ru"), None)
+        };
+        let result = engine.transcribe(&[], &both).expect("transcribe ok");
+        assert_eq!(result.text, "fake:ru:0:pnc=off:itn=on");
+        let one = TranscribeOptions {
+            pnc: Some(true),
+            ..TranscribeOptions::default()
+        };
+        let result = engine.transcribe(&[], &one).expect("transcribe ok");
+        assert_eq!(result.text, "fake:default:0:pnc=on");
     }
 
     #[test]
     fn transcribe_with_model_and_empty_pcm() {
         let engine = FakeEngine;
         let result = engine
-            .transcribe(&[], Some("ru"), Some("ru"))
+            .transcribe(&[], &options(Some("ru"), Some("ru")))
             .expect("transcribe ok");
         assert_eq!(result.text, "fake:ru:0");
         assert_eq!(result.language.as_deref(), Some("ru"));
@@ -88,7 +133,9 @@ mod tests {
     fn segment_spans_the_whole_buffer() {
         let engine = FakeEngine;
         let pcm = vec![0.0f32; 32_000]; // 2 s at 16 kHz
-        let result = engine.transcribe(&pcm, None, None).expect("transcribe ok");
+        let result = engine
+            .transcribe(&pcm, &TranscribeOptions::default())
+            .expect("transcribe ok");
         assert_eq!(result.segments.len(), 1);
         assert_eq!(result.segments[0].start, 0.0);
         assert_eq!(result.segments[0].end, 2.0);
@@ -99,7 +146,9 @@ mod tests {
     fn words_are_ordered_and_cover_the_buffer() {
         let engine = FakeEngine;
         let pcm = vec![0.0f32; 16_000]; // 1 s at 16 kHz
-        let result = engine.transcribe(&pcm, None, None).expect("transcribe ok");
+        let result = engine
+            .transcribe(&pcm, &TranscribeOptions::default())
+            .expect("transcribe ok");
         assert_eq!(result.words.len(), 3, "{:?}", result.words);
         assert_eq!(result.words[0].start, 0.0);
         assert_eq!(result.words.last().expect("last word").end, 1.0);

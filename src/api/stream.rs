@@ -1,7 +1,8 @@
 //! WS /v1/audio/stream: streaming transcription over WebSocket.
 //!
 //! Protocol (control frames are JSON text):
-//!   client -> {"type":"start","model":"<alias>"?,"language":"ru"?}
+//!   client -> {"type":"start","model":"<alias>"?,"language":"ru"?,
+//!              "pnc":true?,"itn":false?}
 //!   client -> binary PCM16LE mono 16 kHz frames (any framing)
 //!   client -> {"type":"stop"}
 //!   server -> {"type":"partial","text":"..."}   per drained chunk
@@ -23,6 +24,7 @@ use serde_json::json;
 
 use crate::audio::TARGET_SR;
 use crate::chunk::chunk_ranges;
+use crate::engine::TranscribeOptions;
 use crate::server::AppState;
 
 #[derive(Deserialize)]
@@ -31,6 +33,8 @@ enum Command {
     Start {
         model: Option<String>,
         language: Option<String>,
+        pnc: Option<bool>,
+        itn: Option<bool>,
     },
     Stop,
 }
@@ -63,11 +67,16 @@ async fn handle(mut socket: WebSocket, state: AppState) {
 }
 
 async fn run_session(socket: &mut WebSocket, state: &AppState) -> SessionEnd {
-    let (model, language) = match wait_for_start(socket).await {
+    let start = match wait_for_start(socket).await {
         Ok(session) => session,
         Err(end) => return end,
     };
-    let language = language.or_else(|| state.cfg.language.clone());
+    let options = Arc::new(TranscribeOptions {
+        model: start.model,
+        language: start.language.or_else(|| state.cfg.language.clone()),
+        pnc: start.pnc.or(state.cfg.pnc),
+        itn: start.itn.or(state.cfg.itn),
+    });
     let max_samples = ((state.cfg.chunk_max_sec * TARGET_SR as f32) as usize).max(1);
 
     let mut buffer: Vec<f32> = Vec::new();
@@ -100,7 +109,7 @@ async fn run_session(socket: &mut WebSocket, state: &AppState) -> SessionEnd {
                     )[0]
                     .end;
                     let chunk: Vec<f32> = buffer.drain(..cut).collect();
-                    let text = match transcribe(state, chunk, &model, &language).await {
+                    let text = match transcribe(state, chunk, &options).await {
                         Ok(text) => text,
                         Err(end) => return end,
                     };
@@ -125,7 +134,7 @@ async fn run_session(socket: &mut WebSocket, state: &AppState) -> SessionEnd {
 
     if !buffer.is_empty() {
         let remainder = std::mem::take(&mut buffer);
-        match transcribe(state, remainder, &model, &language).await {
+        match transcribe(state, remainder, &options).await {
             Ok(text) => parts.push(text),
             Err(end) => return end,
         }
@@ -137,10 +146,16 @@ async fn run_session(socket: &mut WebSocket, state: &AppState) -> SessionEnd {
     SessionEnd::Completed
 }
 
+/// What the start frame asked for, before the server defaults are folded in.
+struct Start {
+    model: Option<String>,
+    language: Option<String>,
+    pnc: Option<bool>,
+    itn: Option<bool>,
+}
+
 /// First phase: only a start command (or ping/pong) is acceptable.
-async fn wait_for_start(
-    socket: &mut WebSocket,
-) -> Result<(Option<String>, Option<String>), SessionEnd> {
+async fn wait_for_start(socket: &mut WebSocket) -> Result<Start, SessionEnd> {
     loop {
         let msg = match socket.recv().await {
             Some(Ok(msg)) => msg,
@@ -148,7 +163,19 @@ async fn wait_for_start(
         };
         match msg {
             Message::Text(text) => match parse_command(&text) {
-                Ok(Command::Start { model, language }) => return Ok((model, language)),
+                Ok(Command::Start {
+                    model,
+                    language,
+                    pnc,
+                    itn,
+                }) => {
+                    return Ok(Start {
+                        model,
+                        language,
+                        pnc,
+                        itn,
+                    });
+                }
                 Ok(Command::Stop) => {
                     return Err(SessionEnd::Error("stop before start".to_string()));
                 }
@@ -170,20 +197,13 @@ fn parse_command(text: &str) -> Result<Command, String> {
 async fn transcribe(
     state: &AppState,
     chunk: Vec<f32>,
-    model: &Option<String>,
-    language: &Option<String>,
+    options: &Arc<TranscribeOptions>,
 ) -> Result<String, SessionEnd> {
     let len = chunk.len();
     // The WS protocol carries text only; the transcript's timestamp rows,
     // which are relative to this drained chunk, are dropped here.
-    crate::api::exec::transcribe_range(
-        state,
-        Arc::new(chunk),
-        0..len,
-        model.clone(),
-        language.clone(),
-    )
-    .await
-    .map(|transcript| transcript.text)
-    .map_err(|e| SessionEnd::Error(e.message))
+    crate::api::exec::transcribe_range(state, Arc::new(chunk), 0..len, Arc::clone(options))
+        .await
+        .map(|transcript| transcript.text)
+        .map_err(|e| SessionEnd::Error(e.message))
 }

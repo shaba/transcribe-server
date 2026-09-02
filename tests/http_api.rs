@@ -105,6 +105,78 @@ async fn post_transcription(
     req.multipart(form).send().await.expect("POST")
 }
 
+/// The pnc/itn request fields are a documented extension over the OpenAI
+/// shape; FakeEngine echoes whatever reached it, so this asserts the whole
+/// path from multipart field to engine options.
+#[tokio::test]
+async fn transcriptions_pnc_and_itn_fields_reach_the_engine() {
+    let base = spawn_fake_app(auth_keys(&[])).await;
+    let form = transcription_form(wav_16k_mono(0.1), "a.wav")
+        .text("pnc", "off")
+        .text("itn", "true");
+    let resp = post_transcription(&base, form, None).await;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.expect("JSON body");
+    let text = json["text"].as_str().expect("text field");
+    assert!(text.contains(":pnc=off"), "unexpected text: {text}");
+    assert!(text.contains(":itn=on"), "unexpected text: {text}");
+}
+
+/// Unset request fields fall back to the server-wide flags, and a request
+/// field overrides them.
+#[tokio::test]
+async fn transcriptions_pnc_falls_back_to_the_server_default() {
+    let cfg = Arc::new(
+        Config::try_parse_from(["ts", "--pnc", "on", "--itn", "off"]).expect("parse config"),
+    );
+    let base = spawn_app_with_cfg(Arc::new(FakeEngine), auth_keys(&[]), cfg).await;
+
+    let resp =
+        post_transcription(&base, transcription_form(wav_16k_mono(0.1), "a.wav"), None).await;
+    let json: serde_json::Value = resp.json().await.expect("JSON body");
+    let text = json["text"].as_str().expect("text field").to_string();
+    assert!(text.contains(":pnc=on"), "unexpected text: {text}");
+    assert!(text.contains(":itn=off"), "unexpected text: {text}");
+
+    let form = transcription_form(wav_16k_mono(0.1), "a.wav").text("pnc", "off");
+    let resp = post_transcription(&base, form, None).await;
+    let json: serde_json::Value = resp.json().await.expect("JSON body");
+    let text = json["text"].as_str().expect("text field").to_string();
+    assert!(text.contains(":pnc=off"), "unexpected text: {text}");
+}
+
+/// Field order is the client's, so a bad toggle can arrive before the audio,
+/// and validation must not depend on which came first. (What this pins is the
+/// ordering-independent answer; the failure mode it guards against -- the
+/// handler returning while the peer is still streaming a large upload, which
+/// costs the client the error JSON and gets it a reset connection instead --
+/// needs a body far larger than a test wants to push through loopback.)
+#[tokio::test]
+async fn transcriptions_bad_toggle_before_the_file_still_answers_json() {
+    let base = spawn_fake_app(auth_keys(&[])).await;
+    let form = reqwest::multipart::Form::new().text("pnc", "maybe").part(
+        "file",
+        reqwest::multipart::Part::bytes(wav_16k_mono(5.0)).file_name("a.wav".to_string()),
+    );
+    let resp = post_transcription(&base, form, None).await;
+    assert_eq!(resp.status(), 400);
+    let json: serde_json::Value = resp.json().await.expect("JSON body");
+    let message = json["error"]["message"].as_str().expect("message");
+    assert!(message.contains("pnc"), "unexpected message: {message}");
+}
+
+#[tokio::test]
+async fn transcriptions_unparsable_toggle_is_400() {
+    let base = spawn_fake_app(auth_keys(&[])).await;
+    let form = transcription_form(wav_16k_mono(0.1), "a.wav").text("pnc", "maybe");
+    let resp = post_transcription(&base, form, None).await;
+    assert_eq!(resp.status(), 400);
+    let json: serde_json::Value = resp.json().await.expect("JSON body");
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+    let message = json["error"]["message"].as_str().expect("message");
+    assert!(message.contains("pnc"), "unexpected message: {message}");
+}
+
 /// Open WebUI contract: multipart model + file, Bearer auth, no
 /// response_format; response is JSON {"text": ...}. Must never break.
 #[cfg(feature = "audio-ffmpeg")]

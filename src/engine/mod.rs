@@ -53,13 +53,34 @@ impl Transcript {
     }
 }
 
+/// Everything one engine call needs besides the audio: which model to use and
+/// the knobs the HTTP layer lets a caller turn.
+///
+/// The toggles are tri-state on purpose. `None` means "whatever this model
+/// family ships with", which is not the same as `Some(false)`: a family whose
+/// published accuracy was measured with punctuation on must keep producing it
+/// unless the caller actually asked for plain text.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TranscribeOptions {
+    /// Request alias, or None for the default (first) model.
+    pub model: Option<String>,
+    /// Language hint, or None to let the model decide.
+    pub language: Option<String>,
+    /// Punctuation and capitalization.
+    pub pnc: Option<bool>,
+    /// Inverse text normalization ("twenty five" -> "25").
+    pub itn: Option<bool>,
+}
+
 pub trait SttEngine: Send + Sync {
-    /// pcm: 16 kHz mono f32 [-1,1]; model: request alias or None (default model)
+    /// pcm: 16 kHz mono f32 [-1,1]. A toggle the loaded model has no runtime
+    /// switch for is ignored, not an error: a server holding several model
+    /// families would otherwise reject requests for the one family that
+    /// cannot honor a server-wide default.
     fn transcribe(
         &self,
         pcm: &[f32],
-        model: Option<&str>,
-        language: Option<&str>,
+        options: &TranscribeOptions,
     ) -> Result<Transcript, EngineError>;
     fn models(&self) -> Vec<String>;
     fn backend(&self) -> String; // "fake" | "cpu" | "cuda" | ...

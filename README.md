@@ -176,6 +176,8 @@ Every flag can also be set through its environment variable (flag wins).
 | `--chunk-max-sec` | `TRANSCRIBE_CHUNK_MAX_SEC` | `25` | Max chunk length in seconds for long-form audio |
 | `--vad-threshold` | `TRANSCRIBE_VAD_THRESHOLD` | `0.01` | Energy VAD threshold for chunk splitting |
 | `--max-upload-mb` | `TRANSCRIBE_MAX_UPLOAD_MB` | `256` | Max upload size in megabytes ([why 256](#upload-size-and-memory)) |
+| `--pnc` | `TRANSCRIBE_PNC` | model default | Punctuation and capitalization: `on` or `off` |
+| `--itn` | `TRANSCRIBE_ITN` | model default | Inverse text normalization ("twenty five" -> "25"): `on` or `off` |
 | `--no-gpu` | `TRANSCRIBE_NO_GPU` | off | Disable GPU inference |
 | `--engine` | `TRANSCRIBE_ENGINE` | `transcribe` | Inference engine (`transcribe`, or `fake` for testing) |
 | `-v`, `--verbose` | `TRANSCRIBE_VERBOSE` | off | Verbose (debug) logging |
@@ -211,10 +213,21 @@ OpenAI-compatible multipart transcription. Fields:
 | `model` | no | Model alias; unknown or missing alias falls back to the default (first) model |
 | `language` | no | Language hint (e.g. `ru`); default from `--language`, else auto-detect |
 | `response_format` | no | `json` (default), `verbose_json` or `text` |
+| `pnc` | no | Punctuation and capitalization: `on`/`off`; default from `--pnc` |
+| `itn` | no | Inverse text normalization: `on`/`off`; default from `--itn` |
 
 Unknown extra fields (`temperature`, `prompt`, ...) are ignored, like the
 OpenAI API does. Long audio is split into chunks (max `--chunk-max-sec`
 seconds) at energy-VAD silence points and the chunk transcripts are joined.
+
+`pnc` and `itn` are an extension over the OpenAI shape (which has no field for
+either) and accept `on`/`off`, `true`/`false`, `1`/`0`, `yes`/`no`; anything
+else is a 400. Leaving both unset keeps each model family's shipped behavior,
+which is what its published accuracy was measured with. They are runtime
+switches only some families implement (the library is asked what the loaded
+model supports): a request for one on a model without the switch is
+transcribed with the family default rather than rejected, so a server holding
+several families does not have to special-case them per request.
 
 ```sh
 curl -s -H "Authorization: Bearer secret" \
@@ -291,13 +304,17 @@ a TODO, not something the limit currently assumes.
 Streaming transcription over WebSocket. Control frames are JSON text:
 
 ```
-client -> {"type":"start","model":"<alias>"?,"language":"ru"?}
+client -> {"type":"start","model":"<alias>"?,"language":"ru"?,"pnc":true?,"itn":false?}
 client -> binary PCM16LE mono 16 kHz frames (any framing)
 client -> {"type":"stop"}
 server -> {"type":"partial","text":"..."}   per drained chunk
 server -> {"type":"final","text":"..."}     on stop, then server closes
 server -> {"type":"error","message":"..."}  on any error, then closes
 ```
+
+`pnc` and `itn` are booleans here (the JSON frame has no reason to spell them
+as words) and mean exactly what the `pnc`/`itn` multipart fields mean above,
+including the fall back to `--pnc`/`--itn`.
 
 Binary frames are only valid after `start` and must contain a whole number of
 PCM16LE samples: a dangling odd byte is a protocol error. Partials are

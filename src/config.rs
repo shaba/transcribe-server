@@ -63,6 +63,14 @@ pub struct Config {
     #[arg(long, default_value_t = 256, env = "TRANSCRIBE_MAX_UPLOAD_MB")]
     pub max_upload_mb: usize,
 
+    /// Punctuation and capitalization: on|off (default: model family default)
+    #[arg(long, env = "TRANSCRIBE_PNC", value_parser = toggle)]
+    pub pnc: Option<bool>,
+
+    /// Inverse text normalization ("twenty five" -> "25"): on|off
+    #[arg(long, env = "TRANSCRIBE_ITN", value_parser = toggle)]
+    pub itn: Option<bool>,
+
     /// Disable GPU inference
     #[arg(long, env = "TRANSCRIBE_NO_GPU")]
     pub no_gpu: bool,
@@ -83,6 +91,17 @@ fn at_least_one(s: &str) -> Result<usize, String> {
         Ok(v)
     } else {
         Err("must be at least 1".to_string())
+    }
+}
+
+/// The one spelling of a boolean knob in this server: the CLI value parser
+/// and the equivalent request fields share it, so `--pnc off` and
+/// `-F pnc=off` accept exactly the same words.
+pub fn toggle(s: &str) -> Result<bool, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" | "yes" => Ok(true),
+        "off" | "false" | "0" | "no" => Ok(false),
+        other => Err(format!("expected on or off, got: {other}")),
     }
 }
 
@@ -166,6 +185,36 @@ mod tests {
         assert!(cfg.language.is_none());
         assert!(!cfg.no_gpu);
         assert!(!cfg.verbose);
+        assert!(cfg.pnc.is_none());
+        assert!(cfg.itn.is_none());
+    }
+
+    #[test]
+    fn toggles_accept_on_off_spellings_and_reject_the_rest() {
+        for (text, expected) in [
+            ("on", true),
+            ("ON", true),
+            ("true", true),
+            ("1", true),
+            ("yes", true),
+            ("off", false),
+            ("false", false),
+            ("0", false),
+            ("no", false),
+        ] {
+            assert_eq!(toggle(text), Ok(expected), "{text}");
+        }
+        assert!(toggle("maybe").is_err());
+        assert!(toggle("").is_err());
+    }
+
+    #[test]
+    fn pnc_and_itn_are_tri_state_on_the_command_line() {
+        let cfg = Config::try_parse_from(["ts", "--pnc", "off", "--itn", "on"]).unwrap();
+        assert_eq!(cfg.pnc, Some(false));
+        assert_eq!(cfg.itn, Some(true));
+        let err = Config::try_parse_from(["ts", "--pnc", "maybe"]).unwrap_err();
+        assert!(err.to_string().contains("expected on or off"), "{err}");
     }
 
     /// The limit is there to bound memory, but it must not reject the

@@ -24,11 +24,12 @@
 use std::sync::Mutex;
 
 use transcribe_cpp::{
-    Backend, Model, ModelOptions, RunOptions, Session, SessionOptions, init_backends_default,
+    Backend, Feature, Itn, Model, ModelOptions, Pnc, RunOptions, Session, SessionOptions,
+    init_backends_default,
 };
 
 use crate::config::ModelSpec;
-use crate::engine::{EngineError, SttEngine, TimedSpan, Transcript};
+use crate::engine::{EngineError, SttEngine, TimedSpan, TranscribeOptions, Transcript};
 
 struct LoadedModel {
     alias: String,
@@ -170,20 +171,52 @@ pub fn init_logging() {
     LOGGING.call_once(transcribe_cpp::init_logging);
 }
 
+/// Resolve a tri-state request toggle against what the loaded model can
+/// actually switch at run time, so a family without the switch is asked for
+/// its own default.
+///
+/// The library tolerates the explicit value either way -- it transcribes with
+/// the family default and logs one WARN per run telling the caller to
+/// pre-check `transcribe_model_supports`. This is that pre-check: it keeps a
+/// server-wide `--pnc` from filling the log with one warning per request for
+/// every model that has no such switch.
+fn resolve_pnc(requested: Option<bool>, supported: bool) -> Pnc {
+    match (requested, supported) {
+        (Some(true), true) => Pnc::On,
+        (Some(false), true) => Pnc::Off,
+        _ => Pnc::Default,
+    }
+}
+
+/// [`resolve_pnc`] for the ITN switch; the two crate enums are distinct types.
+fn resolve_itn(requested: Option<bool>, supported: bool) -> Itn {
+    match (requested, supported) {
+        (Some(true), true) => Itn::On,
+        (Some(false), true) => Itn::Off,
+        _ => Itn::Default,
+    }
+}
+
 impl SttEngine for TranscribeCppEngine {
     fn transcribe(
         &self,
         pcm: &[f32],
-        model: Option<&str>,
-        language: Option<&str>,
+        request: &TranscribeOptions,
     ) -> Result<Transcript, EngineError> {
-        let entry = self.resolve(model);
+        let entry = self.resolve(request.model.as_deref());
+        // Probed per call rather than cached at load: the probe is a plain
+        // struct read behind the FFI, invisible next to the inference it
+        // guards.
+        let pnc = resolve_pnc(request.pnc, entry.model.supports(Feature::Pnc));
+        let itn = resolve_itn(request.itn, entry.model.supports(Feature::Itn));
         // RunOptions::default() asks for TimestampKind::Auto, i.e. the richest
         // granularity the family supports (token-level for GigaAM, segment for
         // whisper). Which rows actually come back is family-dependent, so the
         // mapping below copies whatever is populated and never assumes.
         let options = RunOptions {
-            language: language.map(str::to_string),
+            language: request.language.clone(),
+            pnc,
+            itn,
             ..RunOptions::default()
         };
         // A poisoned lock means a previous run panicked; the session itself
@@ -211,9 +244,28 @@ impl SttEngine for TranscribeCppEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::{TranscribeCppEngine, convert};
+    use super::{TranscribeCppEngine, convert, resolve_itn, resolve_pnc};
     use crate::config::ModelSpec;
-    use crate::engine::SttEngine;
+    use crate::engine::{SttEngine, TranscribeOptions};
+    use transcribe_cpp::{Itn, Pnc};
+
+    #[test]
+    fn toggles_apply_only_to_models_that_switch_them() {
+        assert_eq!(resolve_pnc(Some(true), true), Pnc::On);
+        assert_eq!(resolve_pnc(Some(false), true), Pnc::Off);
+        assert_eq!(resolve_itn(Some(true), true), Itn::On);
+        assert_eq!(resolve_itn(Some(false), true), Itn::Off);
+        // Unset stays the family default whatever the model supports, and an
+        // explicit value on a family without the switch does too.
+        for supported in [true, false] {
+            assert_eq!(resolve_pnc(None, supported), Pnc::Default);
+            assert_eq!(resolve_itn(None, supported), Itn::Default);
+        }
+        for requested in [Some(true), Some(false)] {
+            assert_eq!(resolve_pnc(requested, false), Pnc::Default);
+            assert_eq!(resolve_itn(requested, false), Itn::Default);
+        }
+    }
 
     #[test]
     fn convert_maps_milliseconds_to_seconds() {
@@ -331,12 +383,16 @@ mod tests {
         assert!(!engine.backend().is_empty());
         // 1 second of silence at 16 kHz; any text (possibly empty) is fine.
         let pcm = vec![0.0f32; 16000];
+        let options = |alias: &str| TranscribeOptions {
+            model: Some(alias.to_string()),
+            ..TranscribeOptions::default()
+        };
         let result = engine
-            .transcribe(&pcm, Some("test"), None)
+            .transcribe(&pcm, &options("test"))
             .expect("transcribe silence");
         // Unknown alias falls back to the default (first) model.
         let result2 = engine
-            .transcribe(&pcm, Some("no-such-alias"), None)
+            .transcribe(&pcm, &options("no-such-alias"))
             .expect("transcribe with unknown alias");
         assert_eq!(result.text.is_empty(), result2.text.is_empty());
         // Timestamp rows, when the family produces them, stay inside the audio.

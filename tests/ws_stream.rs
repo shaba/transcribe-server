@@ -94,6 +94,27 @@ async fn start_frames_stop_yields_final_text() {
 }
 
 #[tokio::test]
+async fn start_frame_carries_the_toggles_to_the_engine() {
+    let base = spawn_fake_app(auth_keys(&[])).await;
+    let mut ws = connect_ws(&base, None).await;
+
+    send_json(
+        &mut ws,
+        json!({"type": "start", "model": "ru", "pnc": false, "itn": true}),
+    )
+    .await;
+    ws.send(Message::Binary(sine_frame(8000).into()))
+        .await
+        .expect("send binary");
+    send_json(&mut ws, json!({"type": "stop"})).await;
+
+    let final_msg = recv_json(&mut ws).await;
+    assert_eq!(final_msg["type"], "final");
+    assert_eq!(final_msg["text"], "fake:ru:8000:pnc=off:itn=on");
+    assert_server_closed(&mut ws).await;
+}
+
+#[tokio::test]
 async fn binary_before_start_is_error() {
     let base = spawn_fake_app(auth_keys(&[])).await;
     let mut ws = connect_ws(&base, None).await;

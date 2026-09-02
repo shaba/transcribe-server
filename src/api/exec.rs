@@ -7,15 +7,16 @@ use std::time::Duration;
 
 use crate::api::error::ApiError;
 use crate::audio::samples_to_sec;
-use crate::engine::{EngineError, Transcript};
+use crate::engine::{EngineError, TranscribeOptions, Transcript};
 use crate::server::AppState;
 
 /// How long a request may wait for a free engine slot before 503.
 const QUEUE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Transcribe pcm[range]: acquire a semaphore permit (bounded wait),
-/// then call the engine via spawn_blocking. pcm is shared so callers
-/// can transcribe several ranges without copying samples.
+/// then call the engine via spawn_blocking. pcm and the options are shared so
+/// callers can transcribe several ranges without copying samples or rebuilding
+/// the same request options per chunk.
 ///
 /// The engine times its rows from the start of the slice it was handed, so
 /// this is where `range.start` is added back: the returned transcript is
@@ -26,8 +27,7 @@ pub(crate) async fn transcribe_range(
     state: &AppState,
     pcm: Arc<Vec<f32>>,
     range: Range<usize>,
-    model: Option<String>,
-    language: Option<String>,
+    options: Arc<TranscribeOptions>,
 ) -> Result<Transcript, ApiError> {
     let offset = samples_to_sec(range.start);
     let permit = tokio::time::timeout(QUEUE_TIMEOUT, state.sem.acquire())
@@ -35,12 +35,11 @@ pub(crate) async fn transcribe_range(
         .map_err(|_| ApiError::busy())?
         .map_err(|e| ApiError::internal(format!("semaphore closed: {e}")))?;
     let engine = Arc::clone(&state.engine);
-    let mut transcript = tokio::task::spawn_blocking(move || {
-        engine.transcribe(&pcm[range], model.as_deref(), language.as_deref())
-    })
-    .await
-    .map_err(|e| ApiError::internal(format!("transcription task failed: {e}")))?
-    .map_err(engine_error)?;
+    let mut transcript =
+        tokio::task::spawn_blocking(move || engine.transcribe(&pcm[range], &options))
+            .await
+            .map_err(|e| ApiError::internal(format!("transcription task failed: {e}")))?
+            .map_err(engine_error)?;
     drop(permit);
     transcript.shift(offset);
     Ok(transcript)
