@@ -1,12 +1,14 @@
-# Kept in sync with .github/workflows/release.yaml: a tag push creates a
-# release with notes only. No binaries and no source tarballs are uploaded;
-# the forge attaches the source archives itself.
+# Kept in sync with .github/workflows/release.yaml: same jobs, same steps,
+# same order. Only the forge API differs; the notes themselves come from the
+# one script both files call, so the two pages cannot say different things.
 #
-# Two deliberate differences from the GitHub file:
-# - Forgejo matches tag filters with glob semantics (no "+" quantifier), so the
-#   semver pattern is spelled with "*".
-# - There is no auto-generated release notes feature, so the body is a fixed
-#   pointer to the commit history.
+# A tag push creates a release whose body is that version's NEWS.md section.
+# No binaries and no source tarballs are uploaded; the forge attaches the
+# source archives itself.
+#
+# One deliberate difference from the GitHub file: Forgejo matches tag filters
+# with glob semantics (no "+" quantifier), so the semver pattern is spelled
+# with "*".
 name: release
 
 on:
@@ -18,12 +20,18 @@ jobs:
   release:
     runs-on: als-huge
     steps:
-      # No checkout: nothing from the tree is needed, the release is created
-      # through the API.
+      # jq builds the request body. NEWS.md is markdown -- quotes, backslashes,
+      # tabs inside code blocks -- and hand-escaping that into a JSON string
+      # produces a malformed request rather than a bad-looking page.
       - name: Install system deps
         run: |
           apt-get update
-          apt-get install -y curl
+          apt-get install -y curl git jq
+      # Full history: the notes script falls back to the commits since the
+      # previous tag when NEWS.md has no section for this one.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Create release
         env:
           FORGE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -34,11 +42,11 @@ jobs:
         # tag, so it already points at the new commit.
         run: |
           api="${{ github.server_url }}/api/v1/repos/${{ github.repository }}/releases"
-          printf '{"tag_name":"%s","name":"%s","body":"%s"}\n' \
-            "$TAG" "$TAG" "See the commit history for the changes in this release." \
-            > release.json
+          tools/release-notes.sh body "$TAG" > release-notes.md
+          jq -n --arg tag "$TAG" --rawfile body release-notes.md \
+            '{tag_name: $tag, name: $tag, body: $body}' > release.json
           id=$(curl -fsS -H "Authorization: token $FORGE_TOKEN" "$api/tags/$TAG" \
-                 | sed -n 's/.*"id":[[:space:]]*\([0-9]\+\).*/\1/p' | head -1) || id=
+                 | jq -r '.id // empty') || id=
           if [ -n "$id" ]; then
             curl -fsS -X PATCH \
               -H "Authorization: token $FORGE_TOKEN" \

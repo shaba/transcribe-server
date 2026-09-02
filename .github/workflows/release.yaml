@@ -1,6 +1,10 @@
-# Kept in sync with .forgejo/workflows/release.yaml: a tag push creates a
-# release with notes only. No binaries and no source tarballs are uploaded;
-# the forge attaches the source archives itself.
+# Kept in sync with .forgejo/workflows/release.yaml: same jobs, same steps,
+# same order. Only the forge API differs; the notes themselves come from the
+# one script both files call, so the two pages cannot say different things.
+#
+# A tag push creates a release whose body is that version's NEWS.md section.
+# No binaries and no source tarballs are uploaded; the forge attaches the
+# source archives itself.
 name: release
 
 on:
@@ -14,8 +18,15 @@ jobs:
     permissions:
       contents: write
     steps:
-      # No checkout: nothing from the tree is needed, the release is created
-      # through the API.
+      # Full history: the notes script falls back to the commits since the
+      # previous tag when NEWS.md has no section for this one.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Collect release notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: tools/release-notes.sh body "$TAG" > release-notes.md
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -28,7 +39,7 @@ jobs:
         # commit.
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --title "$TAG" --verify-tag
+            gh release edit "$TAG" --title "$TAG" --notes-file release-notes.md --verify-tag
           else
-            gh release create "$TAG" --title "$TAG" --generate-notes
+            gh release create "$TAG" --title "$TAG" --notes-file release-notes.md
           fi

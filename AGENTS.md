@@ -62,9 +62,23 @@ if the test is wrong, fix the test in the same commit and say so in the message.
 
 ## Repository hygiene
 
-Only code, tests, fixtures, packaging, README.md and this AGENTS.md belong in
-the repo. Design notes, specs, plans, spike write-ups live OUTSIDE the repo
-(maintainer keeps them in `~/notes/transcribe-server/`). Do not commit them.
+Only code, tests, fixtures, packaging, release tooling, README.md, NEWS.md and
+this AGENTS.md belong in the repo. Design notes, specs, plans, spike write-ups
+live OUTSIDE the repo (maintainer keeps them in `~/notes/transcribe-server/`).
+Do not commit them.
+
+## Releases
+
+A release is a `Release X.Y.Z` commit (version in `Cargo.toml`, `Cargo.lock`
+and the README status line) plus an annotated `vX.Y.Z` tag. Pushing the tag is
+what publishes: both forges create the release page from that version's
+`NEWS.md` section.
+
+Write the NEWS section before tagging. `tools/release-notes.sh draft` groups
+the commits since the last tag as a starting point; edit it into what a reader
+needs -- which library version this release now requires, which default changed
+under them -- because that is the part a commit list cannot produce. A tag
+pushed without a section still publishes, with the commit list as the body.
 
 ## Layout
 
@@ -79,6 +93,9 @@ src/chunk/         energy VAD chunker for long-form audio (~25-30 s window)
 src/engine/        SttEngine trait, FakeEngine, transcribe_cpp (feature-gated)
 tests/             integration tests against FakeEngine; fixtures in tests/fixtures/
 packaging/         systemd unit + env example (host deploy, like llama-server)
+tools/             release-notes.sh: NEWS.md section for a tag, called by both
+                   forge release workflows
+NEWS.md            what changed per release; the release pages are its sections
 ```
 
 ## Gotchas
