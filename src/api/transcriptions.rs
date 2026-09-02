@@ -157,7 +157,7 @@ async fn handle(
     let ranges = chunk_ranges(
         &pcm,
         TARGET_SR,
-        state.cfg.chunk_max_sec,
+        state.chunk_max_sec_for(model_info.as_ref()),
         state.cfg.vad_threshold,
     );
     // Shared so per-chunk blocking tasks borrow ranges without copying PCM.

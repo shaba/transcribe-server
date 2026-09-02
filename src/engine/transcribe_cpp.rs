@@ -120,7 +120,9 @@ impl TranscribeCppEngine {
         })
     }
 
-    /// Requested alias if known, otherwise the default (first) model.
+    /// Requested alias if known, otherwise the default (first) model. Must
+    /// stay the same rule as `SttEngine::resolve_model`, which is what the
+    /// HTTP layer consults about the model a request will run on.
     fn resolve(&self, alias: Option<&str>) -> &LoadedModel {
         alias
             .and_then(|a| self.models.iter().find(|m| m.alias == a))

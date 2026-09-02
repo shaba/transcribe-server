@@ -173,7 +173,7 @@ Every flag can also be set through its environment variable (flag wins).
 | `--api-key` | `TRANSCRIBE_API_KEY` | (none) | API key required in the Authorization header (repeatable) |
 | `--api-key-file` | `TRANSCRIBE_API_KEY_FILE` | (none) | File with API keys, one per line |
 | `--language` | `TRANSCRIBE_LANGUAGE` | auto-detect | Default transcription language |
-| `--chunk-max-sec` | `TRANSCRIBE_CHUNK_MAX_SEC` | `25` | Max chunk length in seconds for long-form audio |
+| `--chunk-max-sec` | `TRANSCRIBE_CHUNK_MAX_SEC` | `25` | Max chunk length in seconds for long-form audio (lowered to the model's own limit when it reports a shorter one) |
 | `--vad-threshold` | `TRANSCRIBE_VAD_THRESHOLD` | `0.01` | Energy VAD threshold for chunk splitting |
 | `--max-upload-mb` | `TRANSCRIBE_MAX_UPLOAD_MB` | `256` | Max upload size in megabytes ([why 256](#upload-size-and-memory)) |
 | `--pnc` | `TRANSCRIBE_PNC` | model default | Punctuation and capitalization: `on` or `off` |
@@ -217,8 +217,13 @@ OpenAI-compatible multipart transcription. Fields:
 | `itn` | no | Inverse text normalization: `on`/`off`; default from `--itn` |
 
 Unknown extra fields (`temperature`, `prompt`, ...) are ignored, like the
-OpenAI API does. Long audio is split into chunks (max `--chunk-max-sec`
-seconds) at energy-VAD silence points and the chunk transcripts are joined.
+OpenAI API does. Long audio is split into chunks at energy-VAD silence points
+and the chunk transcripts are joined. A chunk is at most `--chunk-max-sec`
+seconds, and always stays inside the loaded model's own maximum
+(`max_audio_sec` in [`/v1/models`](#get-v1models)) when that is shorter.
+Handing a model a longer chunk is not a soft failure: the families that
+enforce the limit refuse the whole chunk, and the ones that do not transcribe
+it at a quality they were never trained for and say so only in a log line.
 
 `pnc` and `itn` are an extension over the OpenAI shape (which has no field for
 either) and accept `on`/`off`, `true`/`false`, `1`/`0`, `yes`/`no`; anything
@@ -363,8 +368,9 @@ including the fall back to `--pnc`/`--itn`.
 
 Binary frames are only valid after `start` and must contain a whole number of
 PCM16LE samples: a dangling odd byte is a protocol error. Partials are
-emitted whenever a full chunk window (`--chunk-max-sec`) is buffered, cut at
-a VAD-detected silence when there is one. The final text is every partial
+emitted whenever a full chunk window is buffered, cut at a VAD-detected
+silence when there is one; the window is `--chunk-max-sec`, or the model's own
+maximum when that is shorter, exactly as for uploads. The final text is every partial
 text plus the remainder joined with a single space (empty chunk transcripts
 are skipped).
 

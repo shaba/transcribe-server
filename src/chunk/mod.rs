@@ -9,6 +9,10 @@ use std::ops::Range;
 /// Seconds to look back from the end of a full window for a silent frame.
 const SEARCH_BACK_SEC: f32 = 10.0;
 
+/// Cap on the search-back window as a fraction of the chunk window, so a short
+/// window still cuts near its end rather than anywhere inside it.
+const SEARCH_BACK_FRACTION: f32 = 0.4;
+
 /// Frame length used for energy estimation, in milliseconds.
 const FRAME_MS: usize = 30;
 
@@ -35,7 +39,12 @@ pub fn chunk_ranges(
     }
     let frame_len = (sample_rate * FRAME_MS / 1000).max(1);
     let max_samples = ((max_sec * sample_rate as f32) as usize).max(frame_len);
-    let search_back = (SEARCH_BACK_SEC * sample_rate as f32) as usize;
+    // Scaled to the window, not fixed: a model whose own limit is shorter than
+    // SEARCH_BACK_SEC would otherwise have its whole window searched, making
+    // the quietest frame anywhere in it the cut -- which turns a window that
+    // opens with a pause into a chunk of a few frames.
+    let search_back =
+        ((SEARCH_BACK_SEC.min(max_sec * SEARCH_BACK_FRACTION)) * sample_rate as f32) as usize;
 
     let mut ranges = Vec::new();
     let mut start = 0usize;
@@ -158,6 +167,24 @@ mod tests {
         assert_eq!(ranges[0], 0..max_samples);
         assert_eq!(ranges[1], max_samples..2 * max_samples);
         assert_eq!(ranges[2], 2 * max_samples..pcm.len());
+    }
+
+    /// A window shorter than the fixed search-back would otherwise have the
+    /// whole window searched, so a pause near its start became the cut and the
+    /// chunk came out a handful of frames long. The cut has to stay near the
+    /// window end whatever the window size.
+    #[test]
+    fn a_short_window_still_cuts_near_its_end() {
+        let mut pcm = silence(0.3); // a pause right after the window opens
+        pcm.extend(sine(9.7));
+        let max_sec = 4.0;
+        let ranges = chunk_ranges(&pcm, SR, max_sec, THRESHOLD);
+        let first = ranges[0].len() as f32 / SR as f32;
+        assert!(
+            first > max_sec * (1.0 - SEARCH_BACK_FRACTION) - 0.1,
+            "first chunk of {first} s is far short of the {max_sec} s window"
+        );
+        assert!(first <= max_sec, "chunk longer than the window: {first} s");
     }
 
     #[test]

@@ -81,7 +81,8 @@ async fn run_session(socket: &mut WebSocket, state: &AppState) -> SessionEnd {
         pnc: start.pnc.or(state.cfg.pnc),
         itn: start.itn.or(state.cfg.itn),
     });
-    let max_samples = ((state.cfg.chunk_max_sec * TARGET_SR as f32) as usize).max(1);
+    let chunk_max_sec = state.chunk_max_sec(options.model.as_deref());
+    let max_samples = ((chunk_max_sec * TARGET_SR as f32) as usize).max(1);
 
     let mut buffer: Vec<f32> = Vec::new();
     let mut parts: Vec<String> = Vec::new();
@@ -105,13 +106,9 @@ async fn run_session(socket: &mut WebSocket, state: &AppState) -> SessionEnd {
                 // Full window buffered: drain at the chunker's first cut
                 // (a silence near the window end when there is one).
                 while buffer.len() >= max_samples {
-                    let cut = chunk_ranges(
-                        &buffer,
-                        TARGET_SR,
-                        state.cfg.chunk_max_sec,
-                        state.cfg.vad_threshold,
-                    )[0]
-                    .end;
+                    let cut =
+                        chunk_ranges(&buffer, TARGET_SR, chunk_max_sec, state.cfg.vad_threshold)[0]
+                            .end;
                     let chunk: Vec<f32> = buffer.drain(..cut).collect();
                     let text = match transcribe(state, chunk, &options).await {
                         Ok(text) => text,
