@@ -27,10 +27,13 @@ jobs:
         run: |
           apt-get update
           apt-get install -y curl git jq
-      # Full history: the notes script falls back to the commits since the
-      # previous tag when NEWS.md has no section for this one.
+      # The notes come from the default branch, not from the tag's own tree:
+      # a NEWS.md section is often written after the tag is cut, and an older
+      # tag predates the file entirely. Full history so the fallback can list
+      # the commits since the previous tag.
       - uses: actions/checkout@v4
         with:
+          ref: master
           fetch-depth: 0
       - name: Create release
         env:
