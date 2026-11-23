@@ -3,7 +3,7 @@
 use std::io::{self, Read};
 use std::net::TcpListener;
 use std::os::fd::AsRawFd;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::{DefaultBodyLimit, Request, State, WebSocketUpgrade};
@@ -18,11 +18,11 @@ use transcribe_server::api::{
     error::ApiError, models::list_models, stream::stream_with_guard, transcriptions,
 };
 use transcribe_server::auth::{AuthKeys, require_api_key};
-use transcribe_server::config::Config;
+use transcribe_server::config::{Config, WorkerMode};
 use transcribe_server::engine::{SttEngine, fake::FakeEngine};
 use transcribe_server::server::AppState;
 
-pub(super) fn supervise(cfg: Config) -> Result<(), String> {
+pub(super) fn run(cfg: Config, mode: WorkerMode) -> Result<(), String> {
     let aliases = match cfg.engine.as_str() {
         "fake" => FakeEngine.models().into_iter().map(|m| m.id).collect(),
         "transcribe" if cfg.model.is_empty() => {
@@ -43,7 +43,18 @@ pub(super) fn supervise(cfg: Config) -> Result<(), String> {
     let listener = TcpListener::bind((cfg.host.as_str(), cfg.port))
         .map_err(|e| format!("binding listener: {e}"))?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-    parent(cfg, keys, aliases, listener).map_err(|e| format!("supervisor: {e}"))
+    match mode {
+        WorkerMode::Supervised => parent(cfg, keys, aliases, listener),
+        WorkerMode::Direct => {
+            super::init_tracing(cfg.verbose);
+            tracing::info!(
+                "listening on http://{} (direct worker)",
+                listener.local_addr().map_err(|e| e.to_string())?
+            );
+            serve(cfg, keys, aliases, listener)
+        }
+    }
+    .map_err(|e| format!("on-demand server: {e}"))
 }
 
 // No child exists here. Unblock termination during the indefinite wait; the
@@ -200,15 +211,18 @@ fn parent(
     }
 }
 
+type LoadAttempt = watch::Receiver<Option<Result<AppState, String>>>;
+
 struct Worker {
     cfg: Arc<Config>,
     aliases: Vec<String>,
-    ready: OnceLock<watch::Receiver<Option<Result<AppState, String>>>>,
+    ready: Mutex<Option<LoadAttempt>>,
     activity: Mutex<Activity>,
 }
 struct Activity {
     active: usize,
     idle_since: Instant,
+    models_loaded: bool,
     retiring: bool,
 }
 struct Lease(Arc<Worker>);
@@ -234,9 +248,17 @@ impl Worker {
         let lease = self.lease()?;
         // The load belongs to the process, not the first HTTP request. A
         // disconnected caller must neither cancel nor duplicate a native load.
-        let mut rx = self
-            .ready
-            .get_or_init(|| {
+        let mut rx = {
+            let mut slot = self.ready.lock().unwrap();
+            // A worker may remain unloaded indefinitely. Let the next request
+            // retry a failed load instead of caching a permanent 503.
+            if slot.as_ref().is_some_and(|rx| match &*rx.borrow() {
+                Some(result) => result.is_err(),
+                None => rx.has_changed().is_err(),
+            }) {
+                *slot = None;
+            }
+            slot.get_or_insert_with(|| {
                 let (tx, rx) = watch::channel(None);
                 let cfg = self.cfg.clone();
                 let loading = lease.clone();
@@ -244,15 +266,17 @@ impl Worker {
                     super::init_native_logging();
                     tracing::info!("loading inference engine");
                     let result = super::build_engine(&cfg).map(|e| AppState::new(e, cfg));
-                    if let Err(e) = &result {
-                        tracing::error!(%e, "engine initialization failed");
+                    match &result {
+                        Ok(_) => loading.0.activity.lock().unwrap().models_loaded = true,
+                        Err(e) => tracing::error!(%e, "engine initialization failed"),
                     }
                     tx.send_replace(Some(result));
                     drop(loading);
                 });
                 rx
             })
-            .clone();
+            .clone()
+        };
         let ready = rx
             .wait_for(|value| value.is_some())
             .await
@@ -268,11 +292,19 @@ impl Worker {
         ))
     }
     async fn idle(&self) {
-        let timeout = Duration::from_secs(self.cfg.idle_worker_timeout);
+        let unloaded = self.cfg.idle_seconds(false);
+        let loaded = self.cfg.idle_seconds(true);
+        if unloaded == 0 && loaded == 0 {
+            return std::future::pending().await;
+        }
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let mut a = self.activity.lock().unwrap();
-            if a.active == 0 && a.idle_since.elapsed() >= timeout {
+            if a.active != 0 {
+                continue;
+            }
+            let seconds = if a.models_loaded { loaded } else { unloaded };
+            if seconds != 0 && a.idle_since.elapsed() >= Duration::from_secs(seconds) {
                 a.retiring = true;
                 return;
             }
@@ -292,9 +324,10 @@ async fn serve(
     let worker = Arc::new(Worker {
         cfg: Arc::new(cfg),
         aliases,
-        ready: OnceLock::new(),
+        ready: Mutex::default(),
         activity: Mutex::new(Activity {
             active: 0,
+            models_loaded: false,
             idle_since: Instant::now(),
             retiring: false,
         }),

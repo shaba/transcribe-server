@@ -48,7 +48,7 @@ async fn idle_supervisor_exits_on_sigterm_without_a_connection() {
             "0",
             "--engine",
             "fake",
-            "--idle-worker-timeout",
+            "--idle-timeout",
             "1",
         ])
         .stdout(Stdio::piped())
@@ -70,6 +70,72 @@ async fn idle_supervisor_exits_on_sigterm_without_a_connection() {
     );
 }
 
+async fn direct_worker(args: &[&str]) -> (tokio::process::Child, String) {
+    let mut worker = Command::new(env!("CARGO_BIN_EXE_transcribe-server"))
+        .args([
+            "--worker-mode",
+            "direct",
+            "--port",
+            "0",
+            "--host",
+            "127.0.0.1",
+            "--engine",
+            "fake",
+        ])
+        .args(args)
+        .env("TRANSCRIBE_IDLE_TIMEOUT", "1")
+        .env("RUST_LOG", "info")
+        .env("NO_COLOR", "1")
+        .stdout(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut logs = BufReader::new(worker.stdout.take().unwrap()).lines();
+    let addr = next_listener(&mut logs).await;
+    tokio::spawn(async move { while let Ok(Some(_)) = logs.next_line().await {} });
+    (worker, format!("http://{addr}"))
+}
+
+#[tokio::test]
+async fn unloaded_override_keeps_direct_worker_until_loaded_then_exits() {
+    let (mut worker, base) = direct_worker(&["--idle-timeout-unloaded", "0"]).await;
+    let client = Client::builder().no_proxy().timeout(WAIT).build().unwrap();
+    sleep(Duration::from_millis(2200)).await;
+    assert!(worker.try_wait().unwrap().is_none());
+    #[cfg(target_os = "linux")]
+    assert_no_child(worker.id().unwrap());
+    client
+        .get(format!("{base}/v1/models?wakeup"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert!(
+        timeout(WAIT, worker.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+}
+
+#[tokio::test]
+async fn loaded_override_keeps_loaded_worker_past_default_timeout() {
+    let (mut worker, base) = direct_worker(&["--idle-timeout-loaded", "0"]).await;
+    let client = Client::builder().no_proxy().timeout(WAIT).build().unwrap();
+    client
+        .get(format!("{base}/v1/models?wakeup"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    sleep(Duration::from_millis(2200)).await;
+    assert!(worker.try_wait().unwrap().is_none());
+    worker.kill().await.unwrap();
+}
+
 #[tokio::test]
 async fn worker_wakes_serves_requests_and_unloads() {
     let tmp = tempfile::tempdir().expect("test tempdir");
@@ -81,7 +147,7 @@ async fn worker_wakes_serves_requests_and_unloads() {
             "0",
             "--engine",
             "fake",
-            "--idle-worker-timeout",
+            "--idle-timeout",
             "1",
             "--api-key",
             KEY,

@@ -1,6 +1,13 @@
 use std::io::BufRead;
 use std::path::PathBuf;
 
+/// Who owns the listener for on-demand inference.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerMode {
+    Supervised,
+    Direct,
+}
+
 /// Command-line configuration, whisper.cpp/llama.cpp flag style.
 #[derive(clap::Parser, Debug, Clone)]
 #[command(name = "transcribe-server", version, about)]
@@ -96,9 +103,21 @@ pub struct Config {
     #[arg(long, default_value = "transcribe", env = "TRANSCRIBE_ENGINE")]
     pub engine: String,
 
-    /// Stop the on-demand inference worker after this many idle seconds (Unix only; 0 disables)
-    #[arg(long, default_value_t = 0, env = "TRANSCRIBE_IDLE_WORKER_TIMEOUT")]
-    pub idle_worker_timeout: u64,
+    /// On-demand launch mode (Unix): supervised or direct; defaults to supervised when an idle policy is specified
+    #[arg(long, value_enum, env = "TRANSCRIBE_WORKER_MODE")]
+    pub worker_mode: Option<WorkerMode>,
+
+    /// Default idle seconds before the worker exits (0 disables idle exit)
+    #[arg(long, env = "TRANSCRIBE_IDLE_TIMEOUT")]
+    pub idle_timeout: Option<u64>,
+
+    /// Override idle seconds before exit with models loaded (0 disables)
+    #[arg(long, env = "TRANSCRIBE_IDLE_TIMEOUT_LOADED")]
+    pub idle_timeout_loaded: Option<u64>,
+
+    /// Override idle seconds before exit with no models loaded (0 disables)
+    #[arg(long, env = "TRANSCRIBE_IDLE_TIMEOUT_UNLOADED")]
+    pub idle_timeout_unloaded: Option<u64>,
 
     /// Verbose logging
     #[arg(short = 'v', long, env = "TRANSCRIBE_VERBOSE")]
@@ -142,6 +161,29 @@ pub struct ModelSpec {
 }
 
 impl Config {
+    /// With no worker options the server retains its eager, single-process behavior.
+    pub fn on_demand_mode(&self) -> Option<WorkerMode> {
+        self.worker_mode.or_else(|| {
+            [
+                self.idle_timeout,
+                self.idle_timeout_loaded,
+                self.idle_timeout_unloaded,
+            ]
+            .iter()
+            .any(Option::is_some)
+            .then_some(WorkerMode::Supervised)
+        })
+    }
+
+    pub fn idle_seconds(&self, loaded: bool) -> u64 {
+        let specific = if loaded {
+            self.idle_timeout_loaded
+        } else {
+            self.idle_timeout_unloaded
+        };
+        specific.or(self.idle_timeout).unwrap_or(0)
+    }
+
     /// Parse `--model` values: "alias=path" keeps the alias,
     /// a bare "path" uses the file stem as the alias.
     pub fn model_specs(&self) -> Vec<ModelSpec> {
@@ -209,6 +251,41 @@ mod tests {
         assert!(cfg.itn.is_none());
         assert!(cfg.device.is_none());
         assert!(!cfg.list_devices);
+    }
+
+    #[test]
+    fn idle_policy_resolution() {
+        for (args, unloaded, loaded) in [
+            (vec!["--idle-timeout", "300"], 300, 300),
+            (vec!["--idle-timeout-loaded", "300"], 0, 300),
+            (
+                vec!["--idle-timeout", "300", "--idle-timeout-unloaded", "0"],
+                0,
+                300,
+            ),
+            (
+                vec!["--idle-timeout-loaded", "0", "--idle-timeout", "15"],
+                15,
+                0,
+            ),
+            (
+                vec!["--idle-timeout-unloaded", "7", "--idle-timeout-loaded", "9"],
+                7,
+                9,
+            ),
+            (vec!["--idle-timeout", "0"], 0, 0),
+        ] {
+            let cfg = Config::try_parse_from(std::iter::once("ts").chain(args)).unwrap();
+            assert_eq!(cfg.on_demand_mode(), Some(WorkerMode::Supervised));
+            assert_eq!(
+                (cfg.idle_seconds(false), cfg.idle_seconds(true)),
+                (unloaded, loaded)
+            );
+        }
+        assert_eq!(
+            Config::try_parse_from(["ts"]).unwrap().on_demand_mode(),
+            None
+        );
     }
 
     #[test]

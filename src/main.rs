@@ -16,9 +16,11 @@ mod idle_worker;
 fn main() -> ExitCode {
     let cfg = Config::parse();
     #[cfg(unix)]
-    if cfg.idle_worker_timeout != 0 && !cfg.list_devices {
+    if let Some(mode) = cfg.on_demand_mode()
+        && !cfg.list_devices
+    {
         // The supervisor must never initialize Tokio, tracing or native backends.
-        return match idle_worker::supervise(cfg) {
+        return match idle_worker::run(cfg, mode) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("{e}");
@@ -92,8 +94,8 @@ async fn run(cfg: Config) -> Result<(), String> {
         tracing::warn!("no API keys configured, authentication is disabled");
     }
     #[cfg(not(unix))]
-    if cfg.idle_worker_timeout != 0 {
-        return Err("--idle-worker-timeout requires Unix".into());
+    if cfg.on_demand_mode().is_some() {
+        return Err("on-demand worker mode requires Unix".into());
     }
 
     init_native_logging();

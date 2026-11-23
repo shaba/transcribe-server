@@ -187,7 +187,10 @@ Every flag can also be set through its environment variable (flag wins).
 | `--device` | (none) | (none) | Load models on this exact compute device index (see `--list-devices`). Flag only, no environment variable: indices are process-local (see "Linking modes") and must not outlive the process in a config file |
 | `--list-devices` | (none) | off | Print the enumerated compute devices and exit, without loading a model |
 | `--engine` | `TRANSCRIBE_ENGINE` | `transcribe` | Inference engine (`transcribe`, or `fake` for testing) |
-| `--idle-worker-timeout` | `TRANSCRIBE_IDLE_WORKER_TIMEOUT` | `0` | Seconds before unloading an idle inference worker (Unix only; `0` loads eagerly) |
+| `--worker-mode` | `TRANSCRIBE_WORKER_MODE` | See below | On-demand launch mode (Unix): `supervised` or `direct` |
+| `--idle-timeout` | `TRANSCRIBE_IDLE_TIMEOUT` | unset | Default seconds before an idle worker exits; `0` disables idle exit |
+| `--idle-timeout-loaded` | `TRANSCRIBE_IDLE_TIMEOUT_LOADED` | inherit | Override idle seconds when models are loaded |
+| `--idle-timeout-unloaded` | `TRANSCRIBE_IDLE_TIMEOUT_UNLOADED` | inherit | Override idle seconds when no models are loaded |
 | `-v`, `--verbose` | `TRANSCRIBE_VERBOSE` | off | Verbose (debug) logging |
 
 Logging uses `tracing`; `RUST_LOG` overrides the level chosen by `-v`.
@@ -198,8 +201,26 @@ server log.
 
 ### On-demand inference (Unix)
 
-Set `--idle-worker-timeout 300` to unload the models after five minutes
-with no active or queued inference requests. A single-threaded supervisor
+With no worker mode or timeout configured the server loads models eagerly,
+as before. Specifying any timeout (even zero) opts into on-demand inference;
+the default launch mode in that case is `supervised`.
+
+`--idle-timeout` sets the default for both model states. A state-specific
+setting overrides it regardless of argument order. An explicit `0` means
+**never exit due to idleness in that state**. If neither value is set for a
+state, its timeout is disabled. Model loading, active or queued inference, and
+open transcription WebSockets are not idle time. Examples:
+
+- `--idle-timeout 300`: exit after five idle minutes in either state.
+- `--idle-timeout 300 --idle-timeout-unloaded 15`: retire a probe-only worker
+  after 15 seconds, but keep loaded models for five idle minutes.
+- `--worker-mode direct --idle-timeout-loaded 300`: one process binds and
+  serves HTTP without forking. It waits indefinitely before the first load,
+  then exits successfully after five loaded idle minutes. Pair this with a
+  container restart policy such as `unless-stopped` to start a new unloaded
+  server. Unlike supervised mode, the port may be unavailable during restart.
+
+In supervised mode, a single-threaded supervisor
 binds the public TCP socket once and sleeps without a worker until a TCP
 connection is waiting. It then forks without accepting the connection. Only the
 child starts an async runtime, accepts connections, and authenticates
@@ -208,8 +229,8 @@ same child; concurrent requests wait for the same load. There is no HTTP
 proxy or private socket directory.
 
 An open transcription WebSocket keeps the models loaded until it closes.
-When idle, the child drains its HTTP connections and exits, even if it
-only served a probe and never loaded a model. The supervisor keeps the port
+When the timeout for its current state expires, the child drains its HTTP
+connections and exits. The supervisor keeps the port
 bound but does not fork again until another connection is waiting.
 Idle keep-alive clients may need to reconnect. The supervisor snapshots
 API keys at startup; restart the service to pick up changes to a key file.
