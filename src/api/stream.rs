@@ -48,7 +48,19 @@ enum SessionEnd {
 }
 
 pub async fn stream(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| handle(socket, state))
+    stream_with_guard(state, ws, ())
+}
+
+/// Keep the caller's activity guard alive through the upgrade and session.
+pub fn stream_with_guard(
+    state: AppState,
+    ws: WebSocketUpgrade,
+    guard: impl Send + 'static,
+) -> Response {
+    ws.on_upgrade(move |socket| async move {
+        let _guard = guard;
+        handle(socket, state).await;
+    })
 }
 
 async fn handle(mut socket: WebSocket, state: AppState) {

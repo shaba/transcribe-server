@@ -36,6 +36,9 @@ reqwest = { version = "0.13.4", default-features = false, features = ["json", "m
 tokio-tungstenite = "0.30.0"
 tower = { version = "0.5.3", features = ["util"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.189"
+
 # Linking mode 2 (see README "Linking modes"): build against a patched
 # transcribe.cpp checkout instead of crates.io. The patch only applies when the
 # patched version satisfies the transcribe-cpp requirement above, so bump that

@@ -2091,6 +2091,7 @@ dependencies = [
  "ffmpeg-next",
  "futures-util",
  "hound",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",

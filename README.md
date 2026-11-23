@@ -7,8 +7,8 @@ and Parakeet). It exposes the familiar `/v1/audio/transcriptions` API so
 clients like Open WebUI can use it as a drop-in STT backend.
 
 Why: llama.cpp-style single-binary deployment for speech-to-text. No Python
-stack, no subprocess calls — audio decoding happens in-process via system
-libav, inference via transcribe.cpp/ggml (CPU or CUDA). One binary plus a
+stack or external audio tools — decoding uses system libav and inference
+uses transcribe.cpp/ggml (CPU or CUDA). One binary plus a
 GGUF model file is the whole install.
 
 Status: early development (0.0.4)
@@ -187,6 +187,7 @@ Every flag can also be set through its environment variable (flag wins).
 | `--device` | (none) | (none) | Load models on this exact compute device index (see `--list-devices`). Flag only, no environment variable: indices are process-local (see "Linking modes") and must not outlive the process in a config file |
 | `--list-devices` | (none) | off | Print the enumerated compute devices and exit, without loading a model |
 | `--engine` | `TRANSCRIBE_ENGINE` | `transcribe` | Inference engine (`transcribe`, or `fake` for testing) |
+| `--idle-worker-timeout` | `TRANSCRIBE_IDLE_WORKER_TIMEOUT` | `0` | Seconds before unloading an idle inference worker (Unix only; `0` loads eagerly) |
 | `-v`, `--verbose` | `TRANSCRIBE_VERBOSE` | off | Verbose (debug) logging |
 
 Logging uses `tracing`; `RUST_LOG` overrides the level chosen by `-v`.
@@ -194,6 +195,38 @@ Diagnostics from the native library (transcribe.cpp and ggml) are routed
 into the same subscriber under the `transcribe_cpp` target, so
 `RUST_LOG=info,transcribe_cpp=warn` keeps the model-load chatter out of the
 server log.
+
+### On-demand inference (Unix)
+
+Set `--idle-worker-timeout 300` to unload the models after five minutes
+with no active or queued inference requests. A single-threaded supervisor
+binds the public TCP socket once, then forks a cold HTTP server. Only the
+child starts an async runtime, accepts connections, and authenticates
+requests. The first inference request loads the configured models in that
+same child; concurrent requests wait for the same load. There is no HTTP
+proxy or private socket directory.
+
+An open transcription WebSocket keeps the models loaded until it closes.
+When idle, the warm child drains its HTTP connections and exits to release
+native resources; the supervisor forks a new cold child on the same port.
+Idle keep-alive clients may need to reconnect. The supervisor snapshots
+API keys at startup; restart the service to pick up changes to a key file.
+
+To warm the worker without uploading audio, send a GET with the bare
+`wakeup` query flag:
+
+```sh
+curl -fsS -H "Authorization: Bearer secret" \
+  'http://127.0.0.1:8010/v1/models?wakeup'
+```
+
+This waits for the model list and resets the idle timer when it finishes.
+The request requires the usual bearer key if authentication is configured.
+Plain model listing returns configured aliases without loading the worker
+or resetting the timer; the wake-up response includes the loaded model
+metadata. `HEAD` requests and `/health` never wake the worker.
+With on-demand inference enabled, `/health` reports
+`"backend":"on-demand"` and checks the listener, not model readiness.
 
 ## API
 
@@ -398,7 +431,9 @@ are skipped).
 OpenAI-style model list. The three OpenAI keys are always present; what the
 library reports about each loaded model rides along with them, so a client can
 pick a model by what it can do instead of by naming convention. A property the
-model does not report is omitted rather than sent empty.
+model does not report is omitted rather than sent empty. In
+[on-demand mode](#on-demand-inference-unix), a plain GET lists only the
+configured aliases; add `?wakeup` for loaded model metadata.
 
 ```json
 {"object":"list","data":[{

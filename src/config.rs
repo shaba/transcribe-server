@@ -96,6 +96,10 @@ pub struct Config {
     #[arg(long, default_value = "transcribe", env = "TRANSCRIBE_ENGINE")]
     pub engine: String,
 
+    /// Stop the on-demand inference worker after this many idle seconds (Unix only; 0 disables)
+    #[arg(long, default_value_t = 0, env = "TRANSCRIBE_IDLE_WORKER_TIMEOUT")]
+    pub idle_worker_timeout: u64,
+
     /// Verbose logging
     #[arg(short = 'v', long, env = "TRANSCRIBE_VERBOSE")]
     pub verbose: bool,
