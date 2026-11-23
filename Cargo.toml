@@ -1,3 +1,7 @@
+[workspace]
+members = ["decoder"]
+resolver = "3"
+
 [package]
 name = "transcribe-server"
 version = "0.0.4"
@@ -9,12 +13,14 @@ description = "OpenAI-compatible speech-to-text server on top of transcribe.cpp"
 [features]
 default = ["audio-ffmpeg"]
 engine-transcribe = ["dep:transcribe-cpp"]
-audio-ffmpeg = ["dep:ffmpeg-next"]
+audio-ffmpeg = ["dep:transcribe-decoder"]
+lazy-ffmpeg = ["dep:libloading"]
 
 [dependencies]
 axum = { version = "0.8.9", features = ["multipart", "ws"] }
 clap = { version = "4.6.6", features = ["derive", "env"] }
-ffmpeg-next = { version = "9.0.0", optional = true, default-features = false, features = ["codec", "format", "software-resampling"] }
+transcribe-decoder = { path = "decoder", optional = true }
+libloading = { version = "0.8.9", optional = true }
 hound = "3.5.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
