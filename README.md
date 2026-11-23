@@ -200,15 +200,17 @@ server log.
 
 Set `--idle-worker-timeout 300` to unload the models after five minutes
 with no active or queued inference requests. A single-threaded supervisor
-binds the public TCP socket once, then forks a cold HTTP server. Only the
+binds the public TCP socket once and sleeps without a worker until a TCP
+connection is waiting. It then forks without accepting the connection. Only the
 child starts an async runtime, accepts connections, and authenticates
 requests. The first inference request loads the configured models in that
 same child; concurrent requests wait for the same load. There is no HTTP
 proxy or private socket directory.
 
 An open transcription WebSocket keeps the models loaded until it closes.
-When idle, the warm child drains its HTTP connections and exits to release
-native resources; the supervisor forks a new cold child on the same port.
+When idle, the child drains its HTTP connections and exits, even if it
+only served a probe and never loaded a model. The supervisor keeps the port
+bound but does not fork again until another connection is waiting.
 Idle keep-alive clients may need to reconnect. The supervisor snapshots
 API keys at startup; restart the service to pick up changes to a key file.
 
@@ -222,9 +224,10 @@ curl -fsS -H "Authorization: Bearer secret" \
 
 This waits for the model list and resets the idle timer when it finishes.
 The request requires the usual bearer key if authentication is configured.
-Plain model listing returns configured aliases without loading the worker
+Plain model listing returns configured aliases without loading the engine
 or resetting the timer; the wake-up response includes the loaded model
-metadata. `HEAD` requests and `/health` never wake the worker.
+metadata. Any connection, including a health probe, can start the HTTP
+worker; `HEAD` requests and `/health` never load the models.
 With on-demand inference enabled, `/health` reports
 `"backend":"on-demand"` and checks the listener, not model readiness.
 

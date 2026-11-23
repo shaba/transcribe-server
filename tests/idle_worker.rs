@@ -16,6 +16,13 @@ use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 const KEY: &str = "test-idle-worker";
 const WAIT: Duration = Duration::from_secs(10);
 
+#[cfg(target_os = "linux")]
+fn assert_no_child(parent: u32) {
+    let children =
+        std::fs::read_to_string(format!("/proc/{parent}/task/{parent}/children")).unwrap();
+    assert!(children.trim().is_empty(), "unexpected child: {children}");
+}
+
 async fn next_listener(
     logs: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
 ) -> String {
@@ -29,6 +36,38 @@ async fn next_listener(
     })
     .await
     .expect("server should start listening")
+}
+
+#[tokio::test]
+async fn idle_supervisor_exits_on_sigterm_without_a_connection() {
+    let mut server = Command::new(env!("CARGO_BIN_EXE_transcribe-server"))
+        .args([
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+            "--engine",
+            "fake",
+            "--idle-worker-timeout",
+            "1",
+        ])
+        .stdout(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut logs = BufReader::new(server.stdout.take().unwrap()).lines();
+    next_listener(&mut logs).await;
+    let pid = server.id().unwrap();
+    #[cfg(target_os = "linux")]
+    assert_no_child(pid);
+    assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) }, 0);
+    assert!(
+        timeout(WAIT, server.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
 }
 
 #[tokio::test]
@@ -56,6 +95,8 @@ async fn worker_wakes_serves_requests_and_unloads() {
         .expect("start server");
     let mut logs = BufReader::new(server.stdout.take().unwrap()).lines();
     let addr = next_listener(&mut logs).await;
+    #[cfg(target_os = "linux")]
+    assert_no_child(server.id().unwrap());
     let client = Client::builder().no_proxy().timeout(WAIT).build().unwrap();
     let base = format!("http://{addr}");
     let models = format!("{base}/v1/models");
@@ -97,12 +138,21 @@ async fn worker_wakes_serves_requests_and_unloads() {
         .unwrap();
     assert_eq!(listed["data"][0]["id"], "fake-model");
     assert!(listed["data"][0].get("arch").is_none());
-    // A cold child does not recycle just because the idle interval passed.
-    assert!(
-        timeout(Duration::from_millis(2200), logs.next_line())
-            .await
-            .is_err()
-    );
+    // The first connection started a worker, but none of these probes may
+    // load the engine. Wait for the supervisor to reap the probe-only child.
+    timeout(WAIT, async {
+        loop {
+            let line = logs.next_line().await.unwrap().expect("supervisor exited");
+            assert!(!line.contains("loading inference engine"), "{line}");
+            if line.contains("(waiting for connection)") {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("probe-only child did not retire");
+    #[cfg(target_os = "linux")]
+    assert_no_child(server.id().unwrap());
     assert_eq!(tmp.path().read_dir().unwrap().count(), 0);
 
     let wake = || client.get(&wakeup).bearer_auth(KEY).send();
@@ -142,6 +192,8 @@ async fn worker_wakes_serves_requests_and_unloads() {
     drop(ws);
 
     assert_eq!(next_listener(&mut logs).await, addr);
+    #[cfg(target_os = "linux")]
+    assert_no_child(server.id().unwrap());
     let audio =
         multipart::Part::bytes(&include_bytes!("fixtures/beep-16k.wav")[..]).file_name("beep.wav");
     let transcription: Value = client

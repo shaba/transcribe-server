@@ -2,6 +2,7 @@
 //! runtime and native library initialization happens after fork, in the child.
 use std::io::{self, Read};
 use std::net::TcpListener;
+use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -45,6 +46,41 @@ pub(super) fn supervise(cfg: Config) -> Result<(), String> {
     parent(cfg, keys, aliases, listener).map_err(|e| format!("supervisor: {e}"))
 }
 
+// No child exists here. Unblock termination during the indefinite wait; the
+// installed handler exits even if the signal arrives just before poll(). Block
+// again before fork so the parent can forward signals and reap a live child.
+fn wait_for_connection(listener: &TcpListener, signals: &libc::sigset_t) -> io::Result<()> {
+    let mut fd = libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    if unsafe { libc::sigprocmask(libc::SIG_UNBLOCK, signals, std::ptr::null_mut()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    loop {
+        let rc = unsafe { libc::poll(&mut fd, 1, -1) };
+        if rc < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        if fd.revents & libc::POLLIN != 0 {
+            break;
+        }
+        return Err(io::Error::other(format!(
+            "listener poll error: {}",
+            fd.revents
+        )));
+    }
+    if unsafe { libc::sigprocmask(libc::SIG_BLOCK, signals, std::ptr::null_mut()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn parent(
     cfg: Config,
     keys: AuthKeys,
@@ -53,7 +89,14 @@ fn parent(
 ) -> io::Result<()> {
     // Synchronous signal waiting avoids handlers, threads and the race between
     // checking a flag and sleeping in waitpid. Children restore the old mask.
-    extern "C" fn caught(_: libc::c_int) {}
+    extern "C" fn caught(sig: libc::c_int) {
+        if sig == libc::SIGTERM || sig == libc::SIGINT {
+            // Only unblocked while idle. _exit is async-signal-safe.
+            unsafe {
+                libc::_exit(0);
+            }
+        }
+    }
     let (signals, old) = unsafe {
         let mut set = std::mem::zeroed();
         let mut old = std::mem::zeroed();
@@ -73,7 +116,10 @@ fn parent(
         }
         (set, old)
     };
+    let local = listener.local_addr()?;
     loop {
+        println!("listening on http://{local} (waiting for connection)");
+        wait_for_connection(&listener, &signals)?;
         // Linked native libraries can start threads before main. Don't run
         // Rust in the child of a known multithreaded process.
         #[cfg(target_os = "linux")]
@@ -126,7 +172,7 @@ fn parent(
                     return Ok(());
                 }
                 if !libc::WIFEXITED(status) || libc::WEXITSTATUS(status) != 0 {
-                    eprintln!("worker exited unexpectedly ({status}); restarting");
+                    eprintln!("worker exited unexpectedly ({status}); backing off");
                     std::thread::sleep(Duration::from_secs(1));
                 }
                 break;
@@ -160,10 +206,9 @@ struct Worker {
     ready: OnceLock<watch::Receiver<Option<Result<AppState, String>>>>,
     activity: Mutex<Activity>,
 }
-#[derive(Default)]
 struct Activity {
     active: usize,
-    idle: Option<Instant>,
+    idle_since: Instant,
     retiring: bool,
 }
 struct Lease(Arc<Worker>);
@@ -172,7 +217,7 @@ impl Drop for Lease {
         let mut a = self.0.activity.lock().unwrap();
         a.active -= 1;
         if a.active == 0 {
-            a.idle = Some(Instant::now());
+            a.idle_since = Instant::now();
         }
     }
 }
@@ -227,7 +272,7 @@ impl Worker {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let mut a = self.activity.lock().unwrap();
-            if a.active == 0 && a.idle.is_some_and(|t| t.elapsed() >= timeout) {
+            if a.active == 0 && a.idle_since.elapsed() >= timeout {
                 a.retiring = true;
                 return;
             }
@@ -248,7 +293,11 @@ async fn serve(
         cfg: Arc::new(cfg),
         aliases,
         ready: OnceLock::new(),
-        activity: Mutex::default(),
+        activity: Mutex::new(Activity {
+            active: 0,
+            idle_since: Instant::now(),
+            retiring: false,
+        }),
     });
     let v1 = Router::new()
         .route("/v1/models", get(models))
@@ -261,11 +310,7 @@ async fn serve(
         .merge(v1)
         .layer(limit)
         .with_state(worker.clone());
-    let local = listener.local_addr()?;
-    tracing::info!(
-        pid = std::process::id(),
-        "listening on http://{local} (on-demand inference)"
-    );
+    tracing::info!(pid = std::process::id(), "HTTP worker ready");
     axum::serve(listener, router)
         .with_graceful_shutdown(async move {
             tokio::select! { _=super::shutdown_signal()=>{}, _=worker.idle()=>{} }
