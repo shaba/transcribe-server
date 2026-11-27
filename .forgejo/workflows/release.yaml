@@ -31,7 +31,7 @@ jobs:
       # a NEWS.md section is often written after the tag is cut, and an older
       # tag predates the file entirely. Full history so the fallback can list
       # the commits since the previous tag.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: master
           fetch-depth: 0

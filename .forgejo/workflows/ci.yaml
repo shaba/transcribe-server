@@ -16,7 +16,7 @@ jobs:
   test:
     runs-on: als-huge
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install system deps
         run: |
           apt-get update
@@ -24,7 +24,7 @@ jobs:
             libavformat-devel libavcodec-devel libavutil-devel \
             libswresample-devel pkg-config cmake
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -45,7 +45,7 @@ jobs:
   engine:
     runs-on: als-huge
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install system deps
         run: |
           apt-get update
@@ -53,7 +53,7 @@ jobs:
             libavformat-devel libavcodec-devel libavutil-devel \
             libswresample-devel pkg-config cmake
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
