@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY decoder ./decoder
 # Don't tune the distributed binary for the build host's instruction set.
 RUN TRANSCRIBE_CMAKE_ARGS="-DTRANSCRIBE_X86_CONSERVATIVE=ON -DGGML_NATIVE=OFF" \
     cargo build --release --locked --features engine-transcribe --bin transcribe-server

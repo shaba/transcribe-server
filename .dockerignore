@@ -4,3 +4,5 @@
 !Cargo.lock
 !src/
 !src/**
+!decoder/
+!decoder/**

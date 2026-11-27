@@ -13,6 +13,7 @@ ENV PATH=/root/.cargo/bin:$PATH
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY decoder ./decoder
 # Include PTX for compute capability 8.0+ and native code for the RTX 30 series (8.6).
 ARG CUDA_ARCHITECTURES="80-virtual;86-real"
 ARG CARGO_BUILD_JOBS=4
