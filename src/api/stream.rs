@@ -15,6 +15,7 @@
 //! a single space; empty chunk transcripts are skipped.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -57,6 +58,11 @@ pub fn stream_with_guard(
     ws: WebSocketUpgrade,
     guard: impl Send + 'static,
 ) -> Response {
+    // A single frame is turned into an f32 buffer inline; cap it so one
+    // client cannot pin the current-thread runtime with a huge allocation.
+    let ws = ws
+        .max_message_size(MAX_WS_FRAME)
+        .max_frame_size(MAX_WS_FRAME);
     ws.on_upgrade(move |socket| async move {
         let _guard = guard;
         handle(socket, state).await;
@@ -78,9 +84,12 @@ async fn handle(mut socket: WebSocket, state: AppState) {
 }
 
 async fn run_session(socket: &mut WebSocket, state: &AppState) -> SessionEnd {
-    let start = match wait_for_start(socket).await {
-        Ok(session) => session,
-        Err(end) => return end,
+    // A caller that opens the socket and never sends start must not hold the
+    // engine lease forever: the on-demand worker would never retire.
+    let start = match tokio::time::timeout(START_TIMEOUT, wait_for_start(socket)).await {
+        Ok(Ok(session)) => session,
+        Ok(Err(end)) => return end,
+        Err(_) => return SessionEnd::Error("no start frame".to_string()),
     };
     let options = Arc::new(TranscribeOptions {
         model: start.model,
@@ -98,9 +107,12 @@ async fn run_session(socket: &mut WebSocket, state: &AppState) -> SessionEnd {
     let mut buffer: Vec<f32> = Vec::new();
     let mut parts: Vec<String> = Vec::new();
     loop {
-        let msg = match socket.recv().await {
-            Some(Ok(msg)) => msg,
-            Some(Err(_)) | None => return SessionEnd::Disconnected,
+        // A client that sends start and then vanishes keeps the engine lease
+        // (and, on-demand, the loaded model) until TCP notices. Bound it.
+        let msg = match tokio::time::timeout(READ_IDLE_TIMEOUT, socket.recv()).await {
+            Ok(Some(Ok(msg))) => msg,
+            Ok(Some(Err(_)) | None) => return SessionEnd::Disconnected,
+            Err(_) => return SessionEnd::Error("stream idle timeout".to_string()),
         };
         match msg {
             Message::Binary(bytes) => {
@@ -170,6 +182,15 @@ struct Start {
     pnc: Option<bool>,
     itn: Option<bool>,
 }
+
+/// How long a client may hold the socket open before sending `start`.
+const START_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long an established stream may stay silent before it is closed.
+const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Largest WebSocket frame/message accepted, in bytes.
+const MAX_WS_FRAME: usize = 4 * 1024 * 1024;
 
 /// First phase: only a start command (or ping/pong) is acceptable.
 async fn wait_for_start(socket: &mut WebSocket) -> Result<Start, SessionEnd> {

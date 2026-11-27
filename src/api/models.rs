@@ -16,7 +16,14 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Value> {
     Json(json!({"object": "list", "data": data}))
 }
 
-fn model_object(model: &ModelInfo) -> Value {
+/// The identity keys only, for an alias whose model has not been loaded yet.
+/// Capability fields are omitted rather than reported as false: unknown is
+/// not the same answer as "cannot".
+pub fn alias_object(id: &str) -> Value {
+    json!({"id": id, "object": "model", "owned_by": "transcribe-server"})
+}
+
+pub fn model_object(model: &ModelInfo) -> Value {
     let mut object = Map::new();
     object.insert("id".to_string(), json!(model.id));
     object.insert("object".to_string(), json!("model"));

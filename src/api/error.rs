@@ -42,6 +42,17 @@ impl ApiError {
         }
     }
 
+    /// A dependency the server cannot serve this request without, e.g. a
+    /// model that failed to load. Kept distinct from [`ApiError::busy`] so a
+    /// misconfiguration is not reported as transient overload.
+    pub fn unavailable(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: msg.into(),
+            error_type: "server_error",
+        }
+    }
+
     /// The caller closed the connection before the answer was ready. Nginx's
     /// 499: no standard status says it, and no client ever reads this one.
     pub fn cancelled() -> Self {
