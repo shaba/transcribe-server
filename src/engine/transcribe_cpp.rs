@@ -696,6 +696,34 @@ mod tests {
         );
     }
 
+    /// Audio past the 25 s training window must be accepted, not rejected:
+    /// 0.5 windows it inside one run (GigaAM) or otherwise has no cap.
+    #[test]
+    #[ignore = "needs TS_TEST_MODEL pointing at a real GGUF model"]
+    fn test_real_model_long_form_audio() {
+        let path = std::env::var("TS_TEST_MODEL").expect("TS_TEST_MODEL not set");
+        let specs = [ModelSpec {
+            alias: "test".to_string(),
+            path: path.into(),
+        }];
+        let engine = TranscribeCppEngine::load(&specs, true, None, None).expect("load model");
+        let cancel = CancelFlag::new();
+        let pcm = vec![0.0f32; 40 * 16_000];
+        let options = TranscribeOptions {
+            model: Some("test".to_string()),
+            ..TranscribeOptions::default()
+        };
+        let result = engine
+            .transcribe(&pcm, &options, &cancel)
+            .expect("40 s must not be rejected as input too long");
+        for span in result.segments.iter().chain(result.words.iter()) {
+            assert!(
+                span.start >= 0.0 && span.end <= 40.5 && span.start <= span.end,
+                "row outside the 40 s buffer: {span:?}"
+            );
+        }
+    }
+
     /// Real-model smoke test: TS_TEST_MODEL=/path/to/model.gguf cargo test \
     ///   --features engine-transcribe -- --ignored
     #[test]
