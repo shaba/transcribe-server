@@ -45,6 +45,14 @@ impl ApiError {
     /// A dependency the server cannot serve this request without, e.g. a
     /// model that failed to load. Kept distinct from [`ApiError::busy`] so a
     /// misconfiguration is not reported as transient overload.
+    pub fn timeout(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::REQUEST_TIMEOUT,
+            message: msg.into(),
+            error_type: "invalid_request_error",
+        }
+    }
+
     pub fn unavailable(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,

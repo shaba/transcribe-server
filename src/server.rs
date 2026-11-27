@@ -32,12 +32,22 @@ pub struct AppState {
     pub engine: Arc<dyn SttEngine>,
     pub cfg: Arc<Config>,
     pub sem: Arc<tokio::sync::Semaphore>, // permits = cfg.parallel
+    /// Bounds concurrent uploads being decoded: each holds the whole body in
+    /// memory plus a libav tempfile, and the engine semaphore is acquired
+    /// only after decode.
+    pub decode_sem: Arc<tokio::sync::Semaphore>,
 }
 
 impl AppState {
     pub fn new(engine: Arc<dyn SttEngine>, cfg: Arc<Config>) -> Self {
         let sem = Arc::new(tokio::sync::Semaphore::new(cfg.parallel));
-        Self { engine, cfg, sem }
+        let decode_sem = Arc::new(tokio::sync::Semaphore::new(cfg.parallel.max(2)));
+        Self {
+            engine,
+            cfg,
+            sem,
+            decode_sem,
+        }
     }
 
     /// Chunk length to use for a request naming `model`: `--chunk-max-sec`,

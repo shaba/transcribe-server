@@ -134,14 +134,29 @@ async fn handle(
         }
     };
     // Decoding (tempfile + libav) is CPU/IO-bound: keep it off the async
-    // runtime threads.
-    let pcm = tokio::task::spawn_blocking(move || decode_to_pcm_16k(&file))
-        .await
-        .map_err(|e| ApiError::internal(format!("decode task failed: {e}")))?
-        .map_err(|e| match e {
-            crate::audio::AudioError::Unavailable => ApiError::internal(e.to_string()),
-            crate::audio::AudioError::Decode(_) => ApiError::bad_request(e.to_string()),
-        })?;
+    // runtime threads. The permit bounds concurrent tempfiles and buffered
+    // decoded audio; the engine permit is taken only after this.
+    let decode_permit = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        state.decode_sem.clone().acquire_owned(),
+    )
+    .await
+    .map_err(|_| ApiError::busy())?
+    .map_err(|_| ApiError::internal("decode queue closed"))?;
+    let pcm = tokio::task::spawn_blocking(move || {
+        let _permit = decode_permit;
+        decode_to_pcm_16k(&file)
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("decode task failed: {e}")))?
+    .map_err(|e| match e {
+        crate::audio::AudioError::Unavailable => ApiError::internal(e.to_string()),
+        crate::audio::AudioError::Decode(detail) => {
+            // libav messages can carry tempfile paths; keep them in the log.
+            tracing::debug!(%detail, "audio decode failed");
+            ApiError::bad_request("unsupported or corrupt audio")
+        }
+    })?;
     let language = language
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
@@ -253,9 +268,9 @@ async fn text_field(
 
 /// Body-over-limit surfaces while reading multipart; keep our error shape.
 fn multipart_error(err: MultipartError, limit_mb: usize) -> ApiError {
-    if err.status() == StatusCode::PAYLOAD_TOO_LARGE {
-        ApiError::too_large(limit_mb)
-    } else {
-        ApiError::bad_request(format!("invalid multipart body: {}", err.body_text()))
+    match err.status() {
+        StatusCode::PAYLOAD_TOO_LARGE => ApiError::too_large(limit_mb),
+        StatusCode::REQUEST_TIMEOUT => ApiError::timeout("request body timed out"),
+        _ => ApiError::bad_request(format!("invalid multipart body: {}", err.body_text())),
     }
 }

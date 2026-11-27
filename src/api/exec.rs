@@ -70,7 +70,12 @@ fn engine_error(err: EngineError) -> ApiError {
         // the world uses for it.
         EngineError::Cancelled => ApiError::cancelled(),
         EngineError::Busy(_) => ApiError::busy(),
-        EngineError::Failed(_) => ApiError::internal(err.to_string()),
+        // Native errors can carry model paths and library text; keep the detail
+        // in the log and give the client a stable message.
+        EngineError::Failed(detail) => {
+            tracing::error!(%detail, "transcription failed");
+            ApiError::internal("transcription failed")
+        }
     }
 }
 
