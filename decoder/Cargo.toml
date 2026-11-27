@@ -1,0 +1,13 @@
+[package]
+name = "transcribe-decoder"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+ffmpeg-next = { version = "9.0.0", default-features = false, features = ["codec", "format", "software-resampling"] }
+tempfile = "3.27.0"

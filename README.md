@@ -195,6 +195,25 @@ into the same subscriber under the `transcribe_cpp` target, so
 `RUST_LOG=info,transcribe_cpp=warn` keeps the model-load chatter out of the
 server log.
 
+### On-demand FFmpeg decoding (Linux)
+
+The default `audio-ffmpeg` build still links the decoder directly. To defer
+loading FFmpeg and its dependencies until the first upload that needs them,
+package the decoder separately. For example, in a Linux image build:
+
+```sh
+cargo build --release --locked -p transcribe-decoder
+install -Dm755 target/release/libtranscribe_decoder.so /opt/transcribe/lib/libtranscribe_decoder.so
+cargo build --release --locked --no-default-features --features engine-transcribe,lazy-ffmpeg --bin transcribe-server
+```
+
+Ship both artifacts from the same revision, plus the usual FFmpeg runtime
+libraries. To choose another trusted install location, set the absolute
+`TRANSCRIBE_DECODER_PATH` **when compiling the server**. 16 kHz mono PCM16
+or float32 WAV is decoded natively. Other formats load the plugin once per
+process. A missing plugin leaves native WAV working but makes fallback
+requests fail; it does not silently disable decoding.
+
 ## API
 
 ### Authentication

@@ -138,7 +138,10 @@ async fn handle(
     let pcm = tokio::task::spawn_blocking(move || decode_to_pcm_16k(&file))
         .await
         .map_err(|e| ApiError::internal(format!("decode task failed: {e}")))?
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        .map_err(|e| match e {
+            crate::audio::AudioError::Unavailable => ApiError::internal(e.to_string()),
+            crate::audio::AudioError::Decode(_) => ApiError::bad_request(e.to_string()),
+        })?;
     let language = language
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())

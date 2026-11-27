@@ -270,7 +270,7 @@ async fn transcriptions_unparsable_toggle_is_400() {
 /// The dictation contract an OpenAI STT client sends: multipart model + file,
 /// Bearer auth, no response_format; response is JSON {"text": ...}. Must
 /// never break.
-#[cfg(feature = "audio-ffmpeg")]
+#[cfg(any(feature = "audio-ffmpeg", feature = "lazy-ffmpeg"))]
 #[tokio::test]
 async fn openai_contract_webm_multipart_returns_json_text() {
     let base = spawn_fake_app(auth_keys(&["k1"])).await;
