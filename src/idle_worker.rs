@@ -266,9 +266,7 @@ impl Worker {
                             .unwrap()
                             .is_some_and(|at| at.elapsed() < LOAD_RETRY_DELAY);
                         if recent {
-                            return Err(ApiError::unavailable(
-                                "model load failed; retry shortly",
-                            ));
+                            return Err(ApiError::unavailable("model load failed; retry shortly"));
                         }
                         true
                     }
@@ -452,10 +450,7 @@ async fn infer_transcribe(
     let (s, _lease) = w.acquire().await?;
     Ok(transcriptions::transcribe.call(req, s).await)
 }
-async fn infer_translate(
-    State(w): State<Arc<Worker>>,
-    req: Request,
-) -> Result<Response, ApiError> {
+async fn infer_translate(State(w): State<Arc<Worker>>, req: Request) -> Result<Response, ApiError> {
     let (s, _lease) = w.acquire().await?;
     Ok(transcriptions::translate.call(req, s).await)
 }
