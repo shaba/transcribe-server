@@ -1,15 +1,31 @@
 //! AppState and router assembly.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::middleware;
 use axum::routing::{get, post};
+use tower_http::timeout::RequestBodyDeadlineLayer;
 
 use crate::auth::{AuthKeys, require_api_key};
 use crate::config::Config;
 use crate::engine::SttEngine;
+
+/// How long a request body may take to arrive, measured from the first byte
+/// of the body rather than reset by each chunk. The body limit bounds its
+/// size, not how long a stalled client can hold the connection (and, in
+/// on-demand mode, the engine lease). Ten minutes allows a slow 256 MB upload
+/// while still bounding it.
+pub const UPLOAD_BODY_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Concurrent API requests one server admits. Each upload buffers up to
+/// `max_upload_mb` and gets a libav tempfile before the engine permit is
+/// taken, so this is the real bound on peak upload memory and tempfiles.
+pub fn request_concurrency(cfg: &Config) -> usize {
+    cfg.parallel.max(2)
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -93,6 +109,10 @@ pub fn build_router(state: AppState, keys: AuthKeys) -> Router {
         .route("/health", get(crate::api::health::health))
         .merge(v1)
         .layer(DefaultBodyLimit::max(state.cfg.max_upload_mb * 1024 * 1024))
+        .layer(RequestBodyDeadlineLayer::new(UPLOAD_BODY_TIMEOUT))
+        .layer(tower::limit::ConcurrencyLimitLayer::new(
+            request_concurrency(&state.cfg),
+        ))
         .with_state(state)
 }
 

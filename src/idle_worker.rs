@@ -16,14 +16,14 @@ use serde_json::{Value, json};
 use tokio::sync::watch;
 use transcribe_server::api::{
     error::ApiError,
-    models::{list_models, model_object},
+    models::{alias_object, list_models},
     stream::stream_with_guard,
     transcriptions,
 };
 use transcribe_server::auth::require_api_key;
 use transcribe_server::config::{Config, WorkerMode};
-use transcribe_server::engine::{ModelInfo, SttEngine, fake::FakeEngine};
-use transcribe_server::server::AppState;
+use transcribe_server::engine::{SttEngine, fake::FakeEngine};
+use transcribe_server::server::{AppState, UPLOAD_BODY_TIMEOUT, request_concurrency};
 
 pub(super) fn run(cfg: Config, mode: WorkerMode) -> Result<(), String> {
     let aliases = match cfg.engine.as_str() {
@@ -354,6 +354,7 @@ async fn serve(cfg: Config, aliases: Vec<String>, listener: TcpListener) -> io::
     }
     let listener = tokio::net::TcpListener::from_std(listener)?;
     let limit = DefaultBodyLimit::max(cfg.max_upload_mb * 1024 * 1024);
+    let request_limit = request_concurrency(&cfg);
     let worker = Arc::new(Worker {
         cfg: Arc::new(cfg),
         aliases,
@@ -376,6 +377,10 @@ async fn serve(cfg: Config, aliases: Vec<String>, listener: TcpListener) -> io::
         .route("/health", get(health))
         .merge(v1)
         .layer(limit)
+        .layer(tower_http::timeout::RequestBodyDeadlineLayer::new(
+            UPLOAD_BODY_TIMEOUT,
+        ))
+        .layer(tower::limit::ConcurrencyLimitLayer::new(request_limit))
         .with_state(worker.clone());
     tracing::info!(pid = std::process::id(), "HTTP worker ready");
 
@@ -417,9 +422,10 @@ async fn health(State(w): State<Arc<Worker>>) -> Json<Value> {
 }
 async fn models(State(w): State<Arc<Worker>>, method: Method, uri: Uri) -> Response {
     if method == Method::GET
-        && uri
-            .query()
-            .is_some_and(|q| q.split('&').any(|p| p == "wakeup"))
+        && uri.query().is_some_and(|q| {
+            q.split('&')
+                .any(|pair| pair.split('=').next() == Some("wakeup"))
+        })
     {
         let mut res = match w.acquire().await {
             Ok((s, _lease)) => list_models(State(s)).await.into_response(),
@@ -429,18 +435,9 @@ async fn models(State(w): State<Arc<Worker>>, method: Method, uri: Uri) -> Respo
             .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         return res;
     }
-    // Same shape as the loaded list, so a client can parse it before the
-    // first wake-up; only the capability fields are absent until load.
-    let data: Vec<_> = w
-        .aliases
-        .iter()
-        .map(|id| {
-            model_object(&ModelInfo {
-                id: id.clone(),
-                ..ModelInfo::default()
-            })
-        })
-        .collect();
+    // Identity only: a capability is unknown until the model loads, and
+    // reporting it as false would be a different claim.
+    let data: Vec<_> = w.aliases.iter().map(|id| alias_object(id)).collect();
     Json(json!({"object":"list","data":data})).into_response()
 }
 async fn infer_transcribe(
