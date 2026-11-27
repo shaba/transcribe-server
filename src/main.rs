@@ -10,11 +10,27 @@ use transcribe_server::engine::SttEngine;
 use transcribe_server::engine::fake::FakeEngine;
 use transcribe_server::server::{AppState, build_router};
 
+#[cfg(unix)]
+mod idle_worker;
+
 fn main() -> ExitCode {
     let cfg = Config::parse();
+    #[cfg(unix)]
+    if let Some(mode) = cfg.on_demand_mode()
+        && !cfg.list_devices
+    {
+        // The supervisor must never initialize Tokio, tracing or native backends.
+        return match idle_worker::run(cfg, mode) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     init_tracing(cfg.verbose);
-    init_native_logging();
     let outcome = if cfg.list_devices {
+        init_native_logging();
         list_devices()
     } else {
         run(cfg)
@@ -62,19 +78,27 @@ fn init_tracing(verbose: bool) {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
-#[tokio::main]
-async fn run(cfg: Config) -> Result<(), String> {
-    tracing::debug!("config: {cfg:#?}");
+fn auth_keys(cfg: &Config) -> Result<AuthKeys, String> {
     let keys: std::collections::HashSet<String> = cfg
         .all_api_keys()
         .map_err(|e| format!("reading API keys: {e}"))?
         .into_iter()
         .collect();
-    if keys.is_empty() {
+    Ok(AuthKeys(Arc::new(keys)))
+}
+
+#[tokio::main]
+async fn run(cfg: Config) -> Result<(), String> {
+    let keys = auth_keys(&cfg)?;
+    if keys.0.is_empty() {
         tracing::warn!("no API keys configured, authentication is disabled");
     }
-    let keys = AuthKeys(Arc::new(keys));
+    #[cfg(not(unix))]
+    if cfg.on_demand_mode().is_some() {
+        return Err("on-demand worker mode requires Unix".into());
+    }
 
+    init_native_logging();
     let engine = build_engine(&cfg)?;
     tracing::info!(
         backend = %engine.backend(),
@@ -138,6 +162,16 @@ fn build_engine(cfg: &Config) -> Result<Arc<dyn SttEngine>, String> {
 }
 
 async fn shutdown_signal() {
+    #[cfg(unix)]
+    if let Ok(mut term) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+    {
+        tokio::select! {
+            _ = term.recv() => {},
+            _ = tokio::signal::ctrl_c() => {},
+        }
+        tracing::info!("shutdown signal received, draining connections");
+        return;
+    }
     if let Err(e) = tokio::signal::ctrl_c().await {
         tracing::error!("failed to install shutdown signal handler: {e}");
         return;

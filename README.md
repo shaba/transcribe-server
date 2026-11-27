@@ -7,8 +7,8 @@ and Parakeet). It exposes the familiar `/v1/audio/transcriptions` API so
 clients like Open WebUI can use it as a drop-in STT backend.
 
 Why: llama.cpp-style single-binary deployment for speech-to-text. No Python
-stack, no subprocess calls — audio decoding happens in-process via system
-libav, inference via transcribe.cpp/ggml (CPU or CUDA). One binary plus a
+stack or external audio tools — decoding uses system libav and inference
+uses transcribe.cpp/ggml (CPU or CUDA). One binary plus a
 GGUF model file is the whole install.
 
 Status: early development (0.0.4)
@@ -222,6 +222,10 @@ Every flag can also be set through its environment variable (flag wins).
 | `--device` | (none) | (none) | Load models on this exact compute device index (see `--list-devices`). Flag only, no environment variable: indices are process-local (see "Linking modes") and must not outlive the process in a config file |
 | `--list-devices` | (none) | off | Print the enumerated compute devices and exit, without loading a model |
 | `--engine` | `TRANSCRIBE_ENGINE` | `transcribe` | Inference engine (`transcribe`, or `fake` for testing) |
+| `--worker-mode` | `TRANSCRIBE_WORKER_MODE` | See below | On-demand launch mode (Unix): `supervised` or `direct` |
+| `--idle-timeout` | `TRANSCRIBE_IDLE_TIMEOUT` | unset | Default seconds before an idle worker exits; `0` disables idle exit |
+| `--idle-timeout-loaded` | `TRANSCRIBE_IDLE_TIMEOUT_LOADED` | inherit | Override idle seconds when models are loaded |
+| `--idle-timeout-unloaded` | `TRANSCRIBE_IDLE_TIMEOUT_UNLOADED` | inherit | Override idle seconds when no models are loaded |
 | `-v`, `--verbose` | `TRANSCRIBE_VERBOSE` | off | Verbose (debug) logging |
 
 Logging uses `tracing`; `RUST_LOG` overrides the level chosen by `-v`.
@@ -248,6 +252,59 @@ libraries. To choose another trusted install location, set the absolute
 or float32 WAV is decoded natively. Other formats load the plugin once per
 process. A missing plugin leaves native WAV working but makes fallback
 requests fail; it does not silently disable decoding.
+
+### On-demand inference (Unix)
+
+With no worker mode or timeout configured the server loads models eagerly,
+as before. Specifying any timeout (even zero) opts into on-demand inference;
+the default launch mode in that case is `supervised`.
+
+`--idle-timeout` sets the default for both model states. A state-specific
+setting overrides it regardless of argument order. An explicit `0` means
+**never exit due to idleness in that state**. If neither value is set for a
+state, its timeout is disabled. Model loading, active or queued inference, and
+open transcription WebSockets are not idle time. Examples:
+
+- `--idle-timeout 300`: exit after five idle minutes in either state.
+- `--idle-timeout 300 --idle-timeout-unloaded 15`: retire a probe-only worker
+  after 15 seconds, but keep loaded models for five idle minutes.
+- `--worker-mode direct --idle-timeout-loaded 300`: one process binds and
+  serves HTTP without forking. It waits indefinitely before the first load,
+  then exits successfully after five loaded idle minutes. Pair this with a
+  container restart policy such as `unless-stopped` to start a new unloaded
+  server. Unlike supervised mode, the port may be unavailable during restart.
+
+In supervised mode, a single-threaded supervisor
+binds the public TCP socket once and sleeps without a worker until a TCP
+connection is waiting. It then forks without accepting the connection. Only the
+child starts an async runtime, accepts connections, and authenticates
+requests. The first inference request loads the configured models in that
+same child; concurrent requests wait for the same load. There is no HTTP
+proxy or private socket directory.
+
+An open transcription WebSocket keeps the models loaded until it closes.
+When the timeout for its current state expires, the child drains its HTTP
+connections and exits. The supervisor keeps the port
+bound but does not fork again until another connection is waiting.
+Idle keep-alive clients may need to reconnect. The supervisor snapshots
+API keys at startup; restart the service to pick up changes to a key file.
+
+To warm the worker without uploading audio, send a GET with the bare
+`wakeup` query flag:
+
+```sh
+curl -fsS -H "Authorization: Bearer secret" \
+  'http://127.0.0.1:8010/v1/models?wakeup'
+```
+
+This waits for the model list and resets the idle timer when it finishes.
+The request requires the usual bearer key if authentication is configured.
+Plain model listing returns configured aliases without loading the engine
+or resetting the timer; the wake-up response includes the loaded model
+metadata. Any connection, including a health probe, can start the HTTP
+worker; `HEAD` requests and `/health` never load the models.
+With on-demand inference enabled, `/health` reports
+`"backend":"on-demand"` and checks the listener, not model readiness.
 
 ## API
 
@@ -452,7 +509,9 @@ are skipped).
 OpenAI-style model list. The three OpenAI keys are always present; what the
 library reports about each loaded model rides along with them, so a client can
 pick a model by what it can do instead of by naming convention. A property the
-model does not report is omitted rather than sent empty.
+model does not report is omitted rather than sent empty. In
+[on-demand mode](#on-demand-inference-unix), a plain GET lists only the
+configured aliases; add `?wakeup` for loaded model metadata.
 
 ```json
 {"object":"list","data":[{
