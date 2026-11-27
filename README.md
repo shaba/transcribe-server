@@ -109,7 +109,7 @@ transcribe-cpp-sys = { path = "/path/to/transcribe.cpp" }
 ```
 
 A patch only applies when the patched version satisfies the `[dependencies]`
-requirement (currently `^0.2.3`). If the checkout carries an older or a
+requirement (currently `^0.5.1`). If the checkout carries an older or a
 semver-incompatible version, bump the requirement in `Cargo.toml` to match —
 otherwise cargo warns `patch ... was not used in the crate graph` and silently
 keeps the crates.io version.
@@ -150,6 +150,13 @@ Notes:
   default) need nothing at runtime.
 - `TRANSCRIBE_DIR` is supported by the crates.io release since
   `transcribe-cpp-sys` 0.2.3, so mode 3 no longer needs the mode 2 patch.
+- Since 0.5 the plain-data types (`RunOptions`, `Transcript`, errors) live in
+  `transcribe-cpp-types`; `transcribe-cpp` re-exports them, so nothing changes
+  for this crate.
+- Model weights are memory-mapped by default. Replace a model file by writing
+  a new file and renaming it over the old one: rewriting or truncating a file
+  that a running server has mapped is undefined. `TRANSCRIBE_NO_MMAP=1` forces
+  a copy instead.
 
 ## Docker (Linux)
 
@@ -286,8 +293,8 @@ An open transcription WebSocket keeps the models loaded until it closes.
 When the timeout for its current state expires, the child drains its HTTP
 connections and exits. The supervisor keeps the port
 bound but does not fork again until another connection is waiting.
-Idle keep-alive clients may need to reconnect. The supervisor snapshots
-API keys at startup; restart the service to pick up changes to a key file.
+Idle keep-alive clients may need to reconnect. The worker reads the API
+keys when it starts; restart the service to pick up changes to a key file.
 
 To warm the worker without uploading audio, send a GET with the bare
 `wakeup` query flag:
@@ -342,6 +349,11 @@ seconds, and always stays inside the loaded model's own maximum
 Handing a model a longer chunk is not a soft failure: the families that
 enforce the limit refuse the whole chunk, and the ones that do not transcribe
 it at a quality they were never trained for and say so only in a log line.
+
+GigaAM since transcribe.cpp 0.5 reports no maximum and encodes audio past its
+25 s training window in overlapping windows internally, so `--chunk-max-sec`
+is a policy choice there (partials for streaming, memory, parallelism), not a
+model limit.
 
 `pnc` and `itn` are an extension over the OpenAI shape (which has no field for
 either) and accept `on`/`off`, `true`/`false`, `1`/`0`, `yes`/`no`; anything
@@ -518,7 +530,7 @@ configured aliases; add `?wakeup` for loaded model metadata.
   "id":"ru","object":"model","owned_by":"transcribe-server",
   "arch":"gigaam","languages":["ru"],
   "supports_translate":false,
-  "max_audio_sec":30.0
+  "supports_long_form":true
 }]}
 ```
 
@@ -529,6 +541,8 @@ configured aliases; add `?wakeup` for loaded model metadata.
 | `supports_translate` | Whether the model can translate at all |
 | `translate_target_languages` | Targets it can translate into; absent means "whatever it was trained to produce" |
 | `max_audio_sec` | Longest audio one inference call may take; absent when the model sets no limit of its own |
+| `supports_streaming` | Present and true when the family implements the native incremental stream API |
+| `supports_long_form` | Present and true when the model handles audio beyond its native window in one run |
 
 ### GET /health
 
