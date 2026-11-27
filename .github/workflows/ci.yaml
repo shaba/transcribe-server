@@ -35,6 +35,7 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
       - run: cargo check --no-default-features
+      - run: cargo check --no-default-features --features lazy-ffmpeg
 
   # Separate job: engine-transcribe builds the vendored C++ (cmake + g++),
   # which takes several minutes and shares nothing with the default-feature

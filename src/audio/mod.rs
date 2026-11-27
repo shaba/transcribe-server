@@ -2,8 +2,18 @@
 //!
 //! WAV that is already 16 kHz mono (i16 or f32) is decoded natively with
 //! hound; everything else (other rates, stereo, webm/ogg/mp3/...) goes
-//! through system libav (ffmpeg-next: demux -> decode -> swresample).
-//! No subprocesses are ever spawned.
+//! through system libav (demux -> decode -> swresample). The libav path is
+//! either linked through the `transcribe-decoder` crate or, under
+//! `lazy-ffmpeg`, loaded as a shared plugin on the first request that needs
+//! it. No subprocesses are ever spawned.
+
+// `lazy-ffmpeg` is the alternative to the default eager `audio-ffmpeg`; both
+// at once would silently pick the eager path and leave libloading unused.
+#[cfg(all(feature = "audio-ffmpeg", feature = "lazy-ffmpeg"))]
+compile_error!(
+    "enable either `audio-ffmpeg` (default) or `lazy-ffmpeg`, not both; \
+     build the lazy variant with --no-default-features --features lazy-ffmpeg"
+);
 
 use std::io::Cursor;
 
@@ -76,13 +86,13 @@ fn decode_via_ffmpeg(_data: &[u8]) -> Result<Vec<f32>, AudioError> {
 mod tests {
     use super::*;
 
-    #[cfg(any(feature = "audio-ffmpeg", feature = "lazy-ffmpeg"))]
+    #[cfg(feature = "audio-ffmpeg")]
     fn fixture(name: &str) -> Vec<u8> {
         let path = format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name);
         std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
     }
 
-    #[cfg(any(feature = "audio-ffmpeg", feature = "lazy-ffmpeg"))]
+    #[cfg(feature = "audio-ffmpeg")]
     fn rms(pcm: &[f32]) -> f32 {
         (pcm.iter().map(|s| s * s).sum::<f32>() / pcm.len() as f32).sqrt()
     }
@@ -126,7 +136,9 @@ mod tests {
         }
     }
 
-    #[cfg(any(feature = "audio-ffmpeg", feature = "lazy-ffmpeg"))]
+    // The lazy build has no plugin in the test environment; its fallback path
+    // is covered by the Unavailable branch of the garbage-bytes test.
+    #[cfg(feature = "audio-ffmpeg")]
     #[test]
     fn wav_44k_resamples_to_16k() {
         let pcm = decode_to_pcm_16k(&fixture("beep-44k.wav")).expect("decode 44.1k wav");
@@ -140,7 +152,7 @@ mod tests {
         assert!(rms(&pcm) > 0.05, "silent output, rms = {}", rms(&pcm));
     }
 
-    #[cfg(any(feature = "audio-ffmpeg", feature = "lazy-ffmpeg"))]
+    #[cfg(feature = "audio-ffmpeg")]
     #[test]
     fn wav_16k_stereo_falls_through_to_ffmpeg() {
         let data = sine_wav(TARGET_SR as u32, 2);
@@ -155,7 +167,7 @@ mod tests {
         assert!(rms(&pcm) > 0.05, "silent output, rms = {}", rms(&pcm));
     }
 
-    #[cfg(any(feature = "audio-ffmpeg", feature = "lazy-ffmpeg"))]
+    #[cfg(feature = "audio-ffmpeg")]
     #[test]
     fn webm_and_ogg_decode_to_about_one_second() {
         for name in ["beep.webm", "beep.ogg"] {
@@ -185,8 +197,13 @@ mod tests {
     }
 
     #[test]
-    fn garbage_bytes_return_decode_error() {
+    fn garbage_bytes_return_an_error() {
         let err = decode_to_pcm_16k(b"not audio").unwrap_err();
-        assert!(matches!(err, AudioError::Decode(_)));
+        // Under lazy-ffmpeg the plugin may be absent, which is Unavailable
+        // rather than a decode failure.
+        assert!(matches!(
+            err,
+            AudioError::Decode(_) | AudioError::Unavailable
+        ));
     }
 }

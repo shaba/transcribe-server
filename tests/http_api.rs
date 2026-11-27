@@ -270,7 +270,7 @@ async fn transcriptions_unparsable_toggle_is_400() {
 /// The dictation contract an OpenAI STT client sends: multipart model + file,
 /// Bearer auth, no response_format; response is JSON {"text": ...}. Must
 /// never break.
-#[cfg(any(feature = "audio-ffmpeg", feature = "lazy-ffmpeg"))]
+#[cfg(feature = "audio-ffmpeg")]
 #[tokio::test]
 async fn openai_contract_webm_multipart_returns_json_text() {
     let base = spawn_fake_app(auth_keys(&["k1"])).await;
@@ -335,6 +335,9 @@ async fn transcriptions_without_file_is_400() {
     assert_eq!(json["error"]["type"], "invalid_request_error");
 }
 
+// The lazy build without a plugin answers 500 (Unavailable), not 400, so this
+// contract test runs only for builds that can actually decode the upload.
+#[cfg(any(feature = "audio-ffmpeg", not(feature = "lazy-ffmpeg")))]
 #[tokio::test]
 async fn transcriptions_garbage_file_is_400() {
     let base = spawn_fake_app(auth_keys(&[])).await;
