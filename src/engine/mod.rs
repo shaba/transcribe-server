@@ -14,6 +14,10 @@ pub enum EngineError {
     /// not a server fault.
     #[error("{0}")]
     Unsupported(String),
+    /// Another run holds this model's compute lease (a native stream).
+    /// Transient overload, not a server fault.
+    #[error("engine busy: {0}")]
+    Busy(String),
     /// The caller went away and the run was aborted on purpose. Not a
     /// failure: nobody is left to read the answer.
     #[error("transcription cancelled")]
@@ -132,6 +136,12 @@ pub struct ModelInfo {
     /// goes straight into JSON: an f32 widened on the way out turns 12345 ms
     /// into 12.345000267028809.
     pub max_audio_sec: Option<f64>,
+    /// Whether the family implements the native incremental stream API.
+    /// GigaAM does not; its long-form support is not a stream.
+    pub supports_streaming: bool,
+    /// Whether the model handles audio longer than its native window in one
+    /// run (GigaAM stitches overlapping encoder windows).
+    pub supports_long_form: bool,
 }
 
 impl ModelInfo {

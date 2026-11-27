@@ -35,7 +35,7 @@ tracing = "0.1.44"
 # it they vanish silently -- the library's own stderr sink is already
 # displaced by then, and nothing fails to compile.
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "tracing-log"] }
-transcribe-cpp = { version = "0.2.3", optional = true }
+transcribe-cpp = { version = "0.5.1", optional = true }
 
 [dev-dependencies]
 futures-util = "0.3.34"

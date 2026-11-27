@@ -77,6 +77,7 @@ impl SttEngine for FakeEngine {
             supports_translate: true,
             translate_target_languages: vec!["en".to_string()],
             max_audio_sec: None,
+            ..ModelInfo::default()
         }]
     }
 

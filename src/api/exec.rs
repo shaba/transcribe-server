@@ -69,6 +69,21 @@ fn engine_error(err: EngineError) -> ApiError {
         // built for the log and never delivered; 499 is the status the rest of
         // the world uses for it.
         EngineError::Cancelled => ApiError::cancelled(),
+        EngineError::Busy(_) => ApiError::busy(),
         EngineError::Failed(_) => ApiError::internal(err.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn engine_errors_map_to_the_http_status_they_mean() {
+        let busy = engine_error(EngineError::Busy("stream active".to_string()));
+        assert_eq!(busy.status, StatusCode::SERVICE_UNAVAILABLE);
+        let unsupported = engine_error(EngineError::Unsupported("no translation".to_string()));
+        assert_eq!(unsupported.status, StatusCode::BAD_REQUEST);
     }
 }

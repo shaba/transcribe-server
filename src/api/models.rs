@@ -47,6 +47,12 @@ pub fn model_object(model: &ModelInfo) -> Value {
     if let Some(seconds) = model.max_audio_sec {
         object.insert("max_audio_sec".to_string(), json!(seconds));
     }
+    if model.supports_streaming {
+        object.insert("supports_streaming".to_string(), json!(true));
+    }
+    if model.supports_long_form {
+        object.insert("supports_long_form".to_string(), json!(true));
+    }
     Value::Object(object)
 }
 
@@ -93,6 +99,7 @@ mod tests {
             supports_translate: true,
             translate_target_languages: vec!["en".to_string()],
             max_audio_sec: Some(30.0),
+            ..ModelInfo::default()
         });
         assert_eq!(object["arch"], "gigaam");
         assert_eq!(object["languages"], serde_json::json!(["ru"]));

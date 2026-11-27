@@ -91,7 +91,7 @@ impl TranscribeCppEngine {
                 backend = %model.backend(),
                 "model loaded"
             );
-            let info = model_info(&spec.alias, &model);
+            let info = model_info(&spec.alias, &model)?;
             models.push(LoadedModel {
                 model,
                 session: Mutex::new(session),
@@ -205,6 +205,7 @@ impl TranscribeCppEngine {
         Ok(ModelOptions {
             backend: if no_gpu { Backend::Cpu } else { Backend::Auto },
             device: Some(device),
+            ..ModelOptions::default()
         })
     }
 
@@ -273,9 +274,18 @@ pub fn init_logging() {
 }
 
 /// What the library reports about a freshly loaded model.
-fn model_info(alias: &str, model: &Model) -> ModelInfo {
-    let caps = model.capabilities();
-    ModelInfo {
+///
+/// Capabilities are ASR-only since 0.4: a VAD, LANGID, TURN or DIARIZE model
+/// answers `UnsupportedRole` here, and the server says so at load instead of
+/// starting and failing every request.
+fn model_info(alias: &str, model: &Model) -> Result<ModelInfo, EngineError> {
+    let caps = model.capabilities().map_err(|e| match e {
+        transcribe_cpp::Error::UnsupportedRole(_) => EngineError::Failed(format!(
+            "model '{alias}' does not serve the ASR role; this server transcribes audio"
+        )),
+        other => EngineError::Failed(format!("reading capabilities of model '{alias}': {other}")),
+    })?;
+    Ok(ModelInfo {
         id: alias.to_string(),
         arch: model.arch(),
         languages: caps.languages,
@@ -283,7 +293,9 @@ fn model_info(alias: &str, model: &Model) -> ModelInfo {
         translate_target_languages: caps.translate_target_languages,
         // The library reports 0 for "no limit of its own".
         max_audio_sec: (caps.max_audio_ms > 0).then(|| caps.max_audio_ms as f64 / 1000.0),
-    }
+        supports_streaming: caps.supports_streaming,
+        supports_long_form: model.supports(Feature::LongForm),
+    })
 }
 
 /// Resolve a tri-state request toggle against what the loaded model can
@@ -441,6 +453,12 @@ impl SttEngine for TranscribeCppEngine {
         session.clear_cancel_token();
         result.map(convert).map_err(|e| match e {
             transcribe_cpp::Error::Aborted { .. } => EngineError::Cancelled,
+            transcribe_cpp::Error::Busy(message) => EngineError::Busy(message),
+            transcribe_cpp::Error::UnsupportedRole(message) => EngineError::Unsupported(message),
+            // Truncated and repetition-stopped decodes carry a partial
+            // transcript, but the OpenAI response has no field for "incomplete
+            // but readable", so they surface as failures with the library's
+            // own wording rather than as silently short text.
             other => EngineError::Failed(format!("model '{}': {other}", entry.info.id)),
         })
     }
@@ -694,6 +712,16 @@ mod tests {
         assert_eq!(models[0].id, "test");
         assert!(!models[0].arch.is_empty());
         assert!(!engine.backend().is_empty());
+        if models[0].arch == "gigaam" {
+            // 0.5 reports no practical audio limit because it stitches
+            // overlapping encoder windows, and it still has no stream API.
+            assert!(models[0].supports_long_form, "gigaam is long-form");
+            assert!(
+                models[0].max_audio_sec.is_none(),
+                "gigaam advertises no cap"
+            );
+            assert!(!models[0].supports_streaming, "gigaam has no native stream");
+        }
         // 1 second of silence at 16 kHz; any text (possibly empty) is fine.
         let pcm = vec![0.0f32; 16000];
         let options = |alias: &str| TranscribeOptions {

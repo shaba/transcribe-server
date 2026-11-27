@@ -35,11 +35,21 @@ pub enum AudioError {
 }
 
 /// Any container/codec -> 16 kHz mono f32 [-1,1].
+///
+/// Non-finite samples are rejected here rather than handed to the engine:
+/// transcribe.cpp 0.4+ fails the whole run on NaN/Inf, and the client should
+/// see a decode error, not an engine error.
 pub fn decode_to_pcm_16k(data: &[u8]) -> Result<Vec<f32>, AudioError> {
-    if let Some(pcm) = wav_fastpath(data) {
-        return Ok(pcm);
+    let pcm = match wav_fastpath(data) {
+        Some(pcm) => pcm,
+        None => decode_via_ffmpeg(data)?,
+    };
+    if pcm.iter().any(|sample| !sample.is_finite()) {
+        return Err(AudioError::Decode(
+            "audio contains non-finite samples".to_string(),
+        ));
     }
-    decode_via_ffmpeg(data)
+    Ok(pcm)
 }
 
 /// Native decode for WAV already matching the target format: 16 kHz mono,

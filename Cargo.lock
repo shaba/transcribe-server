@@ -2063,24 +2063,31 @@ dependencies = [
 
 [[package]]
 name = "transcribe-cpp"
-version = "0.2.3"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b405c121ef674311b9e8eba83e45d859663da681952c7b95b730792ffde358e7"
+checksum = "61e75c48306ea56be8bb2361f03d81d6a5f9ad916e7a07ea8d3f64ed12749da0"
 dependencies = [
  "log",
  "thiserror",
  "transcribe-cpp-sys",
+ "transcribe-cpp-types",
 ]
 
 [[package]]
 name = "transcribe-cpp-sys"
-version = "0.2.3"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00e81030804f0ce2dd83761ba18e90e0c0c0c2794d68ca008e24245ed6d2702e"
+checksum = "323903fad2bcebaf025314ccb5dc3e178ba8e61622fc935fe17096d5ab93244b"
 dependencies = [
  "cmake",
  "serde_json",
 ]
+
+[[package]]
+name = "transcribe-cpp-types"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "876ac0d2b1f250507a2e9f46b1a8ec50dcad8371be83977d6e23e6a5824a9ef8"
 
 [[package]]
 name = "transcribe-decoder"
