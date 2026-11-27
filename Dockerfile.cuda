@@ -1,0 +1,34 @@
+ARG CUDA_VERSION=13.3.1
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS build
+ARG RUST_VERSION=1.93.1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential ca-certificates cmake curl libclang-dev pkg-config \
+        libavcodec-dev libavformat-dev libavutil-dev libswresample-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl --fail --silent --show-error --location https://sh.rustup.rs -o /tmp/rustup.sh \
+    && sh /tmp/rustup.sh -y --profile minimal --default-toolchain "$RUST_VERSION" \
+    && rm /tmp/rustup.sh
+ENV PATH=/root/.cargo/bin:$PATH
+
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+# Include PTX for compute capability 8.0+ and native code for the RTX 30 series (8.6).
+ARG CUDA_ARCHITECTURES="80-virtual;86-real"
+ARG CARGO_BUILD_JOBS=4
+RUN TRANSCRIBE_CMAKE_ARGS="-DTRANSCRIBE_X86_CONSERVATIVE=ON -DGGML_NATIVE=OFF -DGGML_CUDA_NCCL=OFF -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES}" \
+    cargo build --release --locked --features engine-transcribe,transcribe-cpp/cuda,transcribe-cpp/shared --bin transcribe-server \
+    && mkdir /opt/transcribe-lib \
+    && cp -a target/release/build/transcribe-cpp-sys-*/out/lib/*.so* /opt/transcribe-lib/
+
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libavcodec60 libavformat60 libavutil58 libswresample4 libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /opt/transcribe-lib/ /usr/local/lib/
+RUN ldconfig
+COPY --from=build /src/target/release/transcribe-server /usr/local/bin/
+USER 65532:65532
+ENV TRANSCRIBE_HOST=0.0.0.0
+EXPOSE 8010
+ENTRYPOINT ["/usr/local/bin/transcribe-server"]

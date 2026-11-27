@@ -151,6 +151,41 @@ Notes:
 - `TRANSCRIBE_DIR` is supported by the crates.io release since
   `transcribe-cpp-sys` 0.2.3, so mode 3 no longer needs the mode 2 patch.
 
+## Docker (Linux)
+
+From a clean checkout, choose one image. Both build the real inference engine
+from `Cargo.lock`, keep FFmpeg decoding enabled, and run as a non-root user.
+No model or API key is baked into either image.
+
+```sh
+docker build -t transcribe-server:cpu .
+docker build -f Dockerfile.cuda -t transcribe-server:cuda .
+```
+
+The CPU recipe does not require a GPU or tune the x86 instruction set to the
+build host. The CUDA recipe requires no GPU at build time. It defaults to
+compute capability 8.0 PTX and 8.6 native code. For another target supported
+by the toolkit, set e.g. `--build-arg CUDA_ARCHITECTURES=89` (not `native`).
+Running the CUDA image requires a compatible NVIDIA driver and NVIDIA
+Container Toolkit on the host. Check visibility with
+`docker run --rm --gpus all transcribe-server:cuda --list-devices`.
+
+Place a compatible GGUF in `./models/model.gguf` (readable by UID 65532).
+Set `TRANSCRIBE_API_KEY` in your environment, then run:
+
+```sh
+docker run --rm -p 127.0.0.1:8010:8010 -e TRANSCRIBE_API_KEY \
+  --mount type=bind,src="$PWD/models",dst=/models,readonly \
+  transcribe-server:cpu -m /models/model.gguf
+```
+
+For CUDA, add `--gpus all` before the image name and use `transcribe-server:cuda`.
+Check `curl -fsS http://127.0.0.1:8010/health`, then try the transcription
+example below. The server binds to all interfaces *inside* the container;
+this example publishes it only on host loopback. In Compose, use `build: .`
+for CPU, or `build: {context: ., dockerfile: Dockerfile.cuda}` and
+`gpus: all` for NVIDIA (Compose 2.30+).
+
 ## Running
 
 ```sh

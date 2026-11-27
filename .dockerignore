@@ -1,0 +1,6 @@
+# Only send the inputs needed for the locked release build (not models or keys).
+*
+!Cargo.toml
+!Cargo.lock
+!src/
+!src/**
