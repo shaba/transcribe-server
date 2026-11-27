@@ -137,3 +137,18 @@ pub unsafe extern "C" fn ts_decode_16k_v1(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::decode;
+
+    /// The plugin and the linked build share this function. The C ABI
+    /// wrapper is exercised by the lazy HTTP path; this keeps the decoder
+    /// itself covered in the workspace gates.
+    #[test]
+    fn decodes_a_16k_mono_wav() {
+        let data = include_bytes!("../../tests/fixtures/beep-16k.wav");
+        let pcm = decode(data).expect("decode fixture");
+        assert!(pcm.len() >= 8_000, "got {} samples", pcm.len());
+    }
+}
