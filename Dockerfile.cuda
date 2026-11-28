@@ -1,5 +1,5 @@
 ARG CUDA_VERSION=13.3.1
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS build
+FROM docker.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS build
 ARG RUST_VERSION=1.93.1
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential ca-certificates cmake curl libclang-dev pkg-config \
@@ -22,7 +22,7 @@ RUN TRANSCRIBE_CMAKE_ARGS="-DTRANSCRIBE_X86_CONSERVATIVE=ON -DGGML_NATIVE=OFF -D
     && mkdir /opt/transcribe-lib \
     && cp -a target/release/build/transcribe-cpp-sys-*/out/lib/*.so* /opt/transcribe-lib/
 
-FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04
+FROM docker.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libavcodec60 libavformat60 libavutil58 libswresample4 libstdc++6 curl \
     && rm -rf /var/lib/apt/lists/*

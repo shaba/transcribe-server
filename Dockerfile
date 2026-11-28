@@ -1,4 +1,4 @@
-FROM rust:1.93-bookworm AS build
+FROM docker.io/library/rust:1.93-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
         cmake libclang-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -11,7 +11,7 @@ COPY decoder ./decoder
 RUN TRANSCRIBE_CMAKE_ARGS="-DTRANSCRIBE_X86_CONSERVATIVE=ON -DGGML_NATIVE=OFF" \
     cargo build --release --locked --features engine-transcribe --bin transcribe-server
 
-FROM debian:bookworm-slim
+FROM docker.io/library/debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libavcodec59 libavformat59 libavutil57 libswresample4 libstdc++6 curl \
     && rm -rf /var/lib/apt/lists/*
