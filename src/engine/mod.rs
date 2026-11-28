@@ -5,6 +5,29 @@ pub mod transcribe_cpp;
 
 pub use cancel::CancelFlag;
 
+/// One update from a streaming decode.
+///
+/// `full` is the model's authoritative hypothesis; `committed` is the prefix
+/// the family considers stable and `tentative` the revisable suffix. The two
+/// change flags let the transport emit only what moved. Offline engines that
+/// only implement [`SttEngine::transcribe`] never return one of these.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StreamUpdate {
+    pub full: String,
+    pub committed: String,
+    pub tentative: String,
+    pub committed_changed: bool,
+    pub tentative_changed: bool,
+    pub is_final: bool,
+}
+
+/// A live streaming decode. Methods block; the WebSocket layer runs them on a
+/// blocking thread. Dropping the value abandons the stream.
+pub trait SttStream: Send {
+    fn feed(&mut self, pcm: &[f32]) -> Result<StreamUpdate, EngineError>;
+    fn finalize(&mut self) -> Result<StreamUpdate, EngineError>;
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum EngineError {
     #[error("unknown model: {0}")]
@@ -223,6 +246,16 @@ pub trait SttEngine: Send + Sync {
             .or_else(|| models.first().cloned())
     }
     fn backend(&self) -> String; // "fake" | "cpu" | "cuda" | ...
+
+    /// Start a native incremental stream when the loaded model implements one.
+    /// `Ok(None)` means the caller should use its chunked fallback; that is
+    /// the normal answer for families (GigaAM, whisper) without a stream API.
+    fn start_stream(
+        &self,
+        _options: &TranscribeOptions,
+    ) -> Result<Option<Box<dyn SttStream>>, EngineError> {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]

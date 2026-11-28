@@ -527,6 +527,12 @@ including the fall back to `--pnc`/`--itn`.
 Binary frames are only valid after `start` and must contain a whole number of
 PCM16LE samples: a dangling odd byte is a protocol error.
 
+If `/v1/models` reports `supports_streaming` for the resolved model, the
+server feeds PCM straight into the family's native stream and uses the
+model's own committed/tentative split; the fallback below is only for models
+without one. GigaAM 0.5 has no native stream (its encoder is not causal), so
+it always takes the fallback.
+
 Streaming commits in windows of `min(--chunk-max-sec, --stream-window-sec)`
 seconds, cut at a VAD-detected silence when there is one (otherwise at the
 window edge). A `partial` frame is a committed chunk: its `text` is that

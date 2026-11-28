@@ -21,17 +21,18 @@
 //! Logging: `init_logging` redirects the library's own stderr sink into
 //! `tracing`; `main` calls it once at startup.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 
 use transcribe_cpp::Task as CppTask;
 use transcribe_cpp::{
     Backend, DeviceType, Feature, Itn, Model, ModelOptions, Pnc, RunOptions, Session,
-    SessionOptions, init_backends_default,
+    SessionOptions, StreamOptions, init_backends_default,
 };
 
 use crate::config::ModelSpec;
 use crate::engine::{
-    CancelFlag, EngineError, ModelInfo, SttEngine, Task, TimedSpan, TranscribeOptions, Transcript,
+    CancelFlag, EngineError, ModelInfo, StreamUpdate, SttEngine, SttStream, Task, TimedSpan,
+    TranscribeOptions, Transcript,
 };
 
 struct LoadedModel {
@@ -49,6 +50,7 @@ struct LoadedModel {
 /// the default model (used when the request names no model or an unknown one).
 pub struct TranscribeCppEngine {
     models: Vec<LoadedModel>,
+    session_options: SessionOptions,
 }
 
 impl TranscribeCppEngine {
@@ -98,7 +100,10 @@ impl TranscribeCppEngine {
                 info,
             });
         }
-        Ok(TranscribeCppEngine { models })
+        Ok(TranscribeCppEngine {
+            models,
+            session_options,
+        })
     }
 
     /// Register the ggml backend modules, once per process, before any model
@@ -254,6 +259,66 @@ fn convert(transcript: transcribe_cpp::Transcript) -> Transcript {
     }
 }
 
+/// Per-request knobs in the crate's run-options shape, shared by the offline
+/// `run` path and the native stream begin call.
+fn cpp_run_options(
+    entry: &LoadedModel,
+    request: &TranscribeOptions,
+) -> Result<RunOptions, EngineError> {
+    // Probed per call rather than cached at load: the probe is a plain
+    // struct read behind the FFI, invisible next to the inference it guards.
+    let pnc = resolve_pnc(request.pnc, entry.model.supports(Feature::Pnc));
+    let itn = resolve_itn(request.itn, entry.model.supports(Feature::Itn));
+    let task = match request.task {
+        Task::Transcribe => CppTask::Transcribe,
+        Task::Translate => {
+            // Asked of the cached capabilities, not of the library: the
+            // answer cannot change for a loaded model, and rebuilding it
+            // allocates a String per supported language.
+            if let Some(refusal) = entry.info.translation_refusal(
+                &format!("model '{}'", entry.info.id),
+                request.target_language.as_deref(),
+            ) {
+                return Err(EngineError::Unsupported(refusal));
+            }
+            CppTask::Translate
+        }
+    };
+    // RunOptions::default() asks for TimestampKind::Auto, i.e. the richest
+    // granularity the family supports (token-level for GigaAM, segment for
+    // whisper). Which rows actually come back is family-dependent, so the
+    // mapping below copies whatever is populated and never assumes.
+    Ok(RunOptions {
+        task,
+        language: request.language.clone(),
+        // Only meaningful for a translation; the library documents its
+        // meaning on a transcribe run as undefined, so it never travels
+        // with one whatever the caller put in the options.
+        target_language: match request.task {
+            Task::Translate => request.target_language.clone(),
+            Task::Transcribe => None,
+        },
+        pnc,
+        itn,
+        ..RunOptions::default()
+    })
+}
+
+/// Map a crate error onto the engine's, preserving the cases the HTTP layer
+/// treats differently and naming the alias for everything else.
+fn map_cpp_error(alias: &str, error: transcribe_cpp::Error) -> EngineError {
+    match error {
+        transcribe_cpp::Error::Aborted { .. } => EngineError::Cancelled,
+        transcribe_cpp::Error::Busy(message) => EngineError::Busy(message),
+        transcribe_cpp::Error::UnsupportedRole(message) => EngineError::Unsupported(message),
+        // Truncated and repetition-stopped decodes carry a partial
+        // transcript, but the OpenAI response has no field for "incomplete
+        // but readable", so they surface as failures with the library's
+        // own wording rather than as silently short text.
+        other => EngineError::Failed(format!("model '{alias}': {other}")),
+    }
+}
+
 /// Route libtranscribe and ggml diagnostics into `tracing` instead of the
 /// library's own stderr sink, once per process. The crate logs through the
 /// `log` facade and `tracing-subscriber` installs the log-to-tracing bridge,
@@ -377,6 +442,144 @@ fn format_memory(bytes: u64) -> String {
     }
 }
 
+enum StreamCommand {
+    Feed(Vec<f32>),
+    Finalize,
+    Abort,
+}
+
+/// A native stream driven by a dedicated thread: the crate's `Stream<'_>`
+/// borrows its `Session`, so both must live in the same closure rather than in
+/// a self-referential struct. `feed`/`finalize` block on a reply channel; the
+/// WebSocket layer runs them on a blocking task.
+struct NativeCppStream {
+    commands: mpsc::Sender<StreamCommand>,
+    events: mpsc::Receiver<Result<StreamUpdate, EngineError>>,
+}
+
+impl SttStream for NativeCppStream {
+    fn feed(&mut self, pcm: &[f32]) -> Result<StreamUpdate, EngineError> {
+        self.commands
+            .send(StreamCommand::Feed(pcm.to_vec()))
+            .map_err(|_| EngineError::Failed("stream worker exited".to_string()))?;
+        self.events
+            .recv()
+            .unwrap_or_else(|_| Err(EngineError::Failed("stream worker exited".to_string())))
+    }
+
+    fn finalize(&mut self) -> Result<StreamUpdate, EngineError> {
+        self.commands
+            .send(StreamCommand::Finalize)
+            .map_err(|_| EngineError::Failed("stream worker exited".to_string()))?;
+        self.events
+            .recv()
+            .unwrap_or_else(|_| Err(EngineError::Failed("stream worker exited".to_string())))
+    }
+}
+
+impl Drop for NativeCppStream {
+    fn drop(&mut self) {
+        // The thread may already have exited after finalize; ignore that.
+        let _ = self.commands.send(StreamCommand::Abort);
+    }
+}
+
+fn stream_update(
+    text: transcribe_cpp::StreamText,
+    update: &transcribe_cpp::StreamUpdate,
+    is_final: bool,
+) -> StreamUpdate {
+    StreamUpdate {
+        full: text.full,
+        committed: text.committed,
+        tentative: text.tentative,
+        committed_changed: update.committed_changed,
+        tentative_changed: update.tentative_changed,
+        is_final,
+    }
+}
+
+fn spawn_native_stream(
+    entry: &LoadedModel,
+    session_options: SessionOptions,
+    run_options: RunOptions,
+) -> Result<NativeCppStream, EngineError> {
+    let (command_tx, command_rx) = mpsc::channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let model = entry.model.clone();
+    let alias = entry.info.id.clone();
+    std::thread::Builder::new()
+        .name("transcribe-stream".to_string())
+        .spawn(move || {
+            let mut session = match model.session_with(&session_options) {
+                Ok(session) => session,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(EngineError::Failed(format!(
+                        "creating stream session for model '{alias}': {e}"
+                    ))));
+                    return;
+                }
+            };
+            let mut stream = match session.stream(&run_options, &StreamOptions::default()) {
+                Ok(stream) => stream,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(map_cpp_error(&alias, e)));
+                    return;
+                }
+            };
+            if ready_tx.send(Ok(())).is_err() {
+                return;
+            }
+            while let Ok(command) = command_rx.recv() {
+                match command {
+                    StreamCommand::Feed(pcm) => match stream.feed(&pcm) {
+                        Ok(update) => {
+                            let text = stream.text();
+                            if event_tx
+                                .send(Ok(stream_update(text, &update, false)))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = event_tx.send(Err(map_cpp_error(&alias, e)));
+                            break;
+                        }
+                    },
+                    StreamCommand::Finalize => {
+                        match stream.finalize() {
+                            Ok(update) => {
+                                let text = stream.text();
+                                let _ = event_tx.send(Ok(stream_update(text, &update, true)));
+                            }
+                            Err(e) => {
+                                let _ = event_tx.send(Err(map_cpp_error(&alias, e)));
+                            }
+                        }
+                        break;
+                    }
+                    StreamCommand::Abort => {
+                        stream.reset();
+                        break;
+                    }
+                }
+            }
+        })
+        .map_err(|e| EngineError::Failed(format!("starting stream thread: {e}")))?;
+    match ready_rx.recv() {
+        Ok(Ok(())) => Ok(NativeCppStream {
+            commands: command_tx,
+            events: event_rx,
+        }),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(EngineError::Failed(
+            "stream worker exited during setup".to_string(),
+        )),
+    }
+}
+
 impl SttEngine for TranscribeCppEngine {
     fn transcribe(
         &self,
@@ -388,41 +591,7 @@ impl SttEngine for TranscribeCppEngine {
         // Probed per call rather than cached at load: the probe is a plain
         // struct read behind the FFI, invisible next to the inference it
         // guards.
-        let pnc = resolve_pnc(request.pnc, entry.model.supports(Feature::Pnc));
-        let itn = resolve_itn(request.itn, entry.model.supports(Feature::Itn));
-        let task = match request.task {
-            Task::Transcribe => CppTask::Transcribe,
-            Task::Translate => {
-                // Asked of the cached capabilities, not of the library: the
-                // answer cannot change for a loaded model, and rebuilding it
-                // allocates a String per supported language.
-                if let Some(refusal) = entry.info.translation_refusal(
-                    &format!("model '{}'", entry.info.id),
-                    request.target_language.as_deref(),
-                ) {
-                    return Err(EngineError::Unsupported(refusal));
-                }
-                CppTask::Translate
-            }
-        };
-        // RunOptions::default() asks for TimestampKind::Auto, i.e. the richest
-        // granularity the family supports (token-level for GigaAM, segment for
-        // whisper). Which rows actually come back is family-dependent, so the
-        // mapping below copies whatever is populated and never assumes.
-        let options = RunOptions {
-            task,
-            language: request.language.clone(),
-            // Only meaningful for a translation; the library documents its
-            // meaning on a transcribe run as undefined, so it never travels
-            // with one whatever the caller put in the options.
-            target_language: match request.task {
-                Task::Translate => request.target_language.clone(),
-                Task::Transcribe => None,
-            },
-            pnc,
-            itn,
-            ..RunOptions::default()
-        };
+        let options = cpp_run_options(entry, request)?;
         // A poisoned lock means a previous run panicked; the session itself
         // stays usable (the crate recovers its own locks the same way).
         let mut session = entry
@@ -451,16 +620,22 @@ impl SttEngine for TranscribeCppEngine {
         };
         drop(guard);
         session.clear_cancel_token();
-        result.map(convert).map_err(|e| match e {
-            transcribe_cpp::Error::Aborted { .. } => EngineError::Cancelled,
-            transcribe_cpp::Error::Busy(message) => EngineError::Busy(message),
-            transcribe_cpp::Error::UnsupportedRole(message) => EngineError::Unsupported(message),
-            // Truncated and repetition-stopped decodes carry a partial
-            // transcript, but the OpenAI response has no field for "incomplete
-            // but readable", so they surface as failures with the library's
-            // own wording rather than as silently short text.
-            other => EngineError::Failed(format!("model '{}': {other}", entry.info.id)),
-        })
+        result
+            .map(convert)
+            .map_err(|e| map_cpp_error(&entry.info.id, e))
+    }
+
+    fn start_stream(
+        &self,
+        request: &TranscribeOptions,
+    ) -> Result<Option<Box<dyn SttStream>>, EngineError> {
+        let entry = self.resolve(request.model.as_deref());
+        if !entry.info.supports_streaming {
+            return Ok(None);
+        }
+        let run_options = cpp_run_options(entry, request)?;
+        let stream = spawn_native_stream(entry, self.session_options.clone(), run_options)?;
+        Ok(Some(Box::new(stream)))
     }
 
     fn models(&self) -> Vec<ModelInfo> {
@@ -694,6 +869,47 @@ mod tests {
             matches!(err, crate::engine::EngineError::Cancelled),
             "{err}"
         );
+    }
+
+    /// Native streaming smoke: needs TS_TEST_STREAMING_MODEL (a model whose
+    /// capabilities advertise streaming, e.g. moonshine-streaming) and
+    /// TS_TEST_AUDIO (a WAV readable by libav/hound).
+    #[test]
+    #[ignore = "needs TS_TEST_STREAMING_MODEL and TS_TEST_AUDIO"]
+    fn test_real_model_native_stream() {
+        let model_path =
+            std::env::var("TS_TEST_STREAMING_MODEL").expect("TS_TEST_STREAMING_MODEL not set");
+        let audio_path = std::env::var("TS_TEST_AUDIO").expect("TS_TEST_AUDIO not set");
+        let data = std::fs::read(audio_path).expect("read audio");
+        let pcm = crate::audio::decode_to_pcm_16k(&data).expect("decode audio");
+        let specs = [ModelSpec {
+            alias: "stream".to_string(),
+            path: model_path.into(),
+        }];
+        let engine = TranscribeCppEngine::load(&specs, true, None, None).expect("load model");
+        let options = TranscribeOptions {
+            model: Some("stream".to_string()),
+            ..TranscribeOptions::default()
+        };
+        let mut stream = engine
+            .start_stream(&options)
+            .expect("start stream")
+            .expect("model must advertise streaming");
+        let mut last = String::new();
+        for chunk in pcm.chunks(1600) {
+            let update = stream.feed(chunk).expect("feed");
+            if !update.full.is_empty() {
+                last = update.full;
+            }
+        }
+        let update = stream.finalize().expect("finalize");
+        assert!(update.is_final);
+        let text = if update.full.trim().is_empty() {
+            last
+        } else {
+            update.full
+        };
+        assert!(!text.trim().is_empty(), "native stream produced no text");
     }
 
     /// Audio past the 25 s training window must be accepted, not rejected:

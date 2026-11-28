@@ -14,7 +14,7 @@
 //! The final text is every partial text plus the remainder joined with
 //! a single space; empty chunk transcripts are skipped.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::State;
@@ -24,7 +24,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::chunk::{first_cut, window_samples};
-use crate::engine::TranscribeOptions;
+use crate::engine::{StreamUpdate, SttStream, TranscribeOptions};
 use crate::server::AppState;
 
 #[derive(Deserialize)]
@@ -83,6 +83,146 @@ async fn handle(mut socket: WebSocket, state: AppState) {
     }
 }
 
+/// PCM16LE bytes -> f32 samples, rejecting a dangling byte.
+fn pcm16_le(bytes: &[u8]) -> Result<Vec<f32>, String> {
+    if !bytes.len().is_multiple_of(2) {
+        return Err("odd-length binary frame: expected whole PCM16LE samples".to_string());
+    }
+    // as_chunks rather than chunks_exact: the odd byte is already rejected,
+    // so the remainder is empty and the array chunks go straight into
+    // from_le_bytes without re-indexing.
+    Ok(bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|sample| f32::from(i16::from_le_bytes(*sample)) / 32768.0)
+        .collect())
+}
+
+async fn native_feed(
+    stream: &Arc<Mutex<Box<dyn SttStream>>>,
+    pcm: Vec<f32>,
+) -> Result<StreamUpdate, SessionEnd> {
+    let stream = Arc::clone(stream);
+    match tokio::task::spawn_blocking(move || {
+        stream
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .feed(&pcm)
+    })
+    .await
+    {
+        Ok(Ok(update)) => Ok(update),
+        Ok(Err(e)) => Err(SessionEnd::Error(e.to_string())),
+        Err(e) => Err(SessionEnd::Error(format!("stream task failed: {e}"))),
+    }
+}
+
+async fn native_finalize(
+    stream: &Arc<Mutex<Box<dyn SttStream>>>,
+) -> Result<StreamUpdate, SessionEnd> {
+    let stream = Arc::clone(stream);
+    match tokio::task::spawn_blocking(move || {
+        stream
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .finalize()
+    })
+    .await
+    {
+        Ok(Ok(update)) => Ok(update),
+        Ok(Err(e)) => Err(SessionEnd::Error(e.to_string())),
+        Err(e) => Err(SessionEnd::Error(format!("stream task failed: {e}"))),
+    }
+}
+
+/// Native stream loop: the family's own committed/tentative split drives the
+/// frames; no chunker or local buffer is involved.
+async fn run_native_stream(socket: &mut WebSocket, stream: Box<dyn SttStream>) -> SessionEnd {
+    let stream = Arc::new(Mutex::new(stream));
+    let mut last_committed = String::new();
+    loop {
+        let msg = match tokio::time::timeout(READ_IDLE_TIMEOUT, socket.recv()).await {
+            Ok(Some(Ok(msg))) => msg,
+            Ok(Some(Err(_)) | None) => return SessionEnd::Disconnected,
+            Err(_) => return SessionEnd::Error("stream idle timeout".to_string()),
+        };
+        match msg {
+            Message::Binary(bytes) => {
+                let pcm = match pcm16_le(&bytes) {
+                    Ok(pcm) => pcm,
+                    Err(message) => return SessionEnd::Error(message),
+                };
+                let update = match native_feed(&stream, pcm).await {
+                    Ok(update) => update,
+                    Err(end) => return end,
+                };
+                if update.committed_changed {
+                    let delta = update
+                        .committed
+                        .strip_prefix(&last_committed)
+                        .unwrap_or(&update.committed)
+                        .to_string();
+                    last_committed = update.committed.clone();
+                    if !delta.is_empty() {
+                        let frame = json!({
+                            "type": "partial",
+                            "text": delta,
+                            "committed": update.committed,
+                            "tentative": ""
+                        })
+                        .to_string();
+                        if socket.send(Message::Text(frame.into())).await.is_err() {
+                            return SessionEnd::Disconnected;
+                        }
+                    }
+                }
+                if update.tentative_changed && !update.tentative.trim().is_empty() {
+                    let frame = json!({
+                        "type": "tentative",
+                        "text": update.tentative.clone(),
+                        "committed": update.committed,
+                        "tentative": update.tentative
+                    })
+                    .to_string();
+                    if socket.send(Message::Text(frame.into())).await.is_err() {
+                        return SessionEnd::Disconnected;
+                    }
+                }
+            }
+            Message::Text(text) => match parse_command(&text) {
+                Ok(Command::Stop) => break,
+                Ok(Command::Start { .. }) => {
+                    return SessionEnd::Error("duplicate start".to_string());
+                }
+                Err(message) => return SessionEnd::Error(message),
+            },
+            Message::Close(_) => return SessionEnd::Disconnected,
+            Message::Ping(_) | Message::Pong(_) => {}
+        }
+    }
+    let update = match native_finalize(&stream).await {
+        Ok(update) => update,
+        Err(end) => return end,
+    };
+    let final_text = if update.full.trim().is_empty() {
+        update.committed
+    } else {
+        update.full
+    };
+    let frame = json!({
+        "type": "final",
+        "text": final_text.clone(),
+        "committed": final_text,
+        "tentative": ""
+    })
+    .to_string();
+    if socket.send(Message::Text(frame.into())).await.is_err() {
+        return SessionEnd::Disconnected;
+    }
+    SessionEnd::Completed
+}
+
 async fn run_session(socket: &mut WebSocket, state: &AppState) -> SessionEnd {
     // A caller that opens the socket and never sends start must not hold the
     // engine lease forever: the on-demand worker would never retire.
@@ -101,6 +241,15 @@ async fn run_session(socket: &mut WebSocket, state: &AppState) -> SessionEnd {
         pnc: start.pnc.or(state.cfg.pnc),
         itn: start.itn.or(state.cfg.itn),
     });
+    // A model with a native stream owns the whole session: feed it directly
+    // and let the family decide when text commits. GigaAM and whisper return
+    // None here and take the chunked fallback below.
+    match state.engine.start_stream(&options) {
+        Ok(Some(stream)) => return run_native_stream(socket, stream).await,
+        Ok(None) => {}
+        Err(e) => return SessionEnd::Error(e.to_string()),
+    }
+
     // The commit window is the operator's chunk length capped by the
     // streaming window: long-form models still get bounded re-decodes, and a
     // short --chunk-max-sec keeps its old per-chunk behaviour.
@@ -125,21 +274,11 @@ async fn run_session(socket: &mut WebSocket, state: &AppState) -> SessionEnd {
         };
         match msg {
             Message::Binary(bytes) => {
-                if bytes.len() % 2 != 0 {
-                    return SessionEnd::Error(
-                        "odd-length binary frame: expected whole PCM16LE samples".to_string(),
-                    );
-                }
-                // as_chunks rather than chunks_exact: the odd byte is already
-                // rejected above, so the remainder is empty, and the array
-                // chunks go straight into from_le_bytes without re-indexing.
-                buffer.extend(
-                    bytes
-                        .as_chunks::<2>()
-                        .0
-                        .iter()
-                        .map(|sample| f32::from(i16::from_le_bytes(*sample)) / 32768.0),
-                );
+                let pcm = match pcm16_le(&bytes) {
+                    Ok(pcm) => pcm,
+                    Err(message) => return SessionEnd::Error(message),
+                };
+                buffer.extend(pcm);
                 // Commit full windows first; a silence near the window end is
                 // preferred, otherwise the window edge cuts.
                 while buffer.len() >= window_len {

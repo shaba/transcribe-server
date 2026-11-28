@@ -14,6 +14,10 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use transcribe_server::config::Config;
 use transcribe_server::engine::fake::FakeEngine;
+use transcribe_server::engine::{
+    CancelFlag, EngineError, ModelInfo, StreamUpdate, SttEngine, SttStream, TranscribeOptions,
+    Transcript,
+};
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -167,6 +171,95 @@ async fn partials_drain_per_chunk_and_final_joins_all() {
     let final_msg = recv_json(&mut ws).await;
     assert_eq!(final_msg["type"], "final");
     assert_eq!(final_msg["text"], "fake:m1:8000 fake:m1:8000");
+    assert_server_closed(&mut ws).await;
+}
+
+/// A model with a native stream bypasses the chunker entirely. This engine
+/// only implements the stream path, so the test also proves the WS handler
+/// prefers it when `start_stream` returns one.
+struct NativeFake;
+
+struct NativeFakeStream {
+    samples: usize,
+}
+
+impl SttStream for NativeFakeStream {
+    fn feed(&mut self, pcm: &[f32]) -> Result<StreamUpdate, EngineError> {
+        self.samples += pcm.len();
+        let text = format!("native:{}", self.samples);
+        Ok(StreamUpdate {
+            full: text.clone(),
+            committed: String::new(),
+            tentative: text.clone(),
+            committed_changed: false,
+            tentative_changed: true,
+            is_final: false,
+        })
+    }
+
+    fn finalize(&mut self) -> Result<StreamUpdate, EngineError> {
+        let text = format!("native:{}:final", self.samples);
+        Ok(StreamUpdate {
+            full: text.clone(),
+            committed: text,
+            tentative: String::new(),
+            committed_changed: true,
+            tentative_changed: true,
+            is_final: true,
+        })
+    }
+}
+
+impl SttEngine for NativeFake {
+    fn transcribe(
+        &self,
+        pcm: &[f32],
+        options: &TranscribeOptions,
+        cancel: &CancelFlag,
+    ) -> Result<Transcript, EngineError> {
+        FakeEngine.transcribe(pcm, options, cancel)
+    }
+
+    fn models(&self) -> Vec<ModelInfo> {
+        FakeEngine.models()
+    }
+
+    fn backend(&self) -> String {
+        "fake-native".to_string()
+    }
+
+    fn start_stream(
+        &self,
+        _options: &TranscribeOptions,
+    ) -> Result<Option<Box<dyn SttStream>>, EngineError> {
+        Ok(Some(Box::new(NativeFakeStream { samples: 0 })))
+    }
+}
+
+#[tokio::test]
+async fn native_stream_bypasses_the_chunker() {
+    let base = spawn_app_with_cfg(
+        Arc::new(NativeFake),
+        auth_keys(&[]),
+        Arc::new(Config::try_parse_from(["ts"]).expect("parse config")),
+    )
+    .await;
+    let mut ws = connect_ws(&base, None).await;
+
+    send_json(&mut ws, json!({"type": "start"})).await;
+    ws.send(Message::Binary(sine_frame(8000).into()))
+        .await
+        .expect("send binary");
+    let tentative = recv_json(&mut ws).await;
+    assert_eq!(tentative["type"], "tentative");
+    assert_eq!(tentative["text"], "native:8000");
+    assert_eq!(tentative["committed"], "");
+
+    send_json(&mut ws, json!({"type": "stop"})).await;
+    let final_msg = recv_json(&mut ws).await;
+    assert_eq!(final_msg["type"], "final");
+    assert_eq!(final_msg["text"], "native:8000:final");
+    assert_eq!(final_msg["committed"], "native:8000:final");
     assert_server_closed(&mut ws).await;
 }
 
