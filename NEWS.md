@@ -7,6 +7,63 @@ Written by hand: what matters in a release is usually the sentence a commit
 list cannot produce -- which library version this one now requires, which
 default changed under you. Commits carry the detail, this carries the point.
 
+## 0.0.5
+
+Built on transcribe.cpp 0.5.1. This jumps from 0.2: the Rust bindings split
+their plain-data types into `transcribe-cpp-types`, model roles grew beyond
+ASR, and GigaAM learned to window long audio internally.
+
+### Requires
+
+- `transcribe-cpp` 0.5.1 (libtranscribe 0.5.x); `transcribe-cpp-types` 0.5.1
+  comes with it.
+- Rust 1.93 or newer, as before.
+- Unchanged system audio dependencies: libavformat / libavcodec / libavutil /
+  libswresample.
+- Model weights are memory-mapped by default. Replace a model file by writing
+  a new file and renaming it over the old one; `TRANSCRIBE_NO_MMAP=1` forces a
+  copy.
+
+### New
+
+- WebSocket streaming has a native path. A model whose `/v1/models` entry says
+  `supports_streaming` is fed PCM directly; its committed/tentative split is
+  sent as `partial` and `tentative` frames. Models without a native stream
+  (GigaAM, whisper) use a bounded commit window: `--stream-window-sec`
+  defaults to 5 s and `--stream-hop-sec` to 1 s, and only the uncommitted tail
+  is re-decoded.
+- GigaAM long-form input. transcribe.cpp 0.5 reports no audio maximum and
+  encodes past the 25 s training window in overlapping windows internally.
+  The default remains the external 25 s chunker: measured 5-14% faster than
+  one long-form run from 33.8 s to 60 min with the same WER. Raise
+  `--chunk-max-sec` above the input length to opt into one run.
+- `/v1/models` reports `supports_streaming` and `supports_long_form`.
+- On-demand inference: `--worker-mode`, `--idle-timeout`,
+  `--idle-timeout-loaded` and `--idle-timeout-unloaded` keep the port bound
+  without holding a model in memory between requests.
+- Opt-in `lazy-ffmpeg` build: the FFmpeg fallback decoder is a shared plugin
+  loaded on the first request that needs it.
+- CPU and CUDA Docker images with a non-root user and a health check.
+
+### Changed
+
+- A native engine `Busy` answer is a 503; an ASR-incapable model is refused at
+  load with `UnsupportedRole` instead of starting and failing every request.
+- Decoded PCM containing NaN or infinity is rejected as a 400 before it
+  reaches the engine.
+- Request bodies have a ten-minute deadline and concurrent uploads are
+  bounded; WebSockets have a start handshake timeout, an idle read timeout
+  and a 4 MiB frame cap.
+- `--features lazy-ffmpeg` must be combined with `--no-default-features`; the
+  two decoder modes cannot be enabled together.
+
+### Fixed
+
+- A model-load failure is no longer reported as a generic 500 or echoed with
+  its internal path; the detail stays in the log.
+- The decoder plugin is opened with `O_NOFOLLOW`, checked for ownership and
+  mode, and loaded through the verified descriptor on Linux.
+
 ## 0.0.4
 
 Built on transcribe.cpp 0.2, and requires it: 0.2 removed the 0.1 device
