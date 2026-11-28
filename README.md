@@ -353,7 +353,19 @@ it at a quality they were never trained for and say so only in a log line.
 GigaAM since transcribe.cpp 0.5 reports no maximum and encodes audio past its
 25 s training window in overlapping windows internally, so `--chunk-max-sec`
 is a policy choice there (partials for streaming, memory, parallelism), not a
-model limit.
+model limit. On the Q8_0 CPU build the default 25 s chunker stayed faster than
+one long-form run on FLEURS Russian audio: 3.57 s vs 3.82 s at 33.8 s, 7.24 s
+vs 7.91 s at 68 s, 31.4 s vs 32.9 s at 5 min, 188.6 s vs 211.9 s at 30 min,
+and 377.6 s vs 429.7 s at 60 min. Normalized WER was identical on the
+reference clips. The default therefore
+remains chunked: it keeps sentence punctuation at chunk starts, emits
+partials, and lets cancellation land between chunks. Raise `--chunk-max-sec`
+above the input length to ask for a single long-form run.
+
+The multilingual variant `gigaam-multilingual-large-ctc` (ru, en, kk, ky, uz)
+runs through the same path, but no GGUF is published: convert it with the
+upstream converter first. A language hint accepts those five codes and does
+not change the output.
 
 `pnc` and `itn` are an extension over the OpenAI shape (which has no field for
 either) and accept `on`/`off`, `true`/`false`, `1`/`0`, `yes`/`no`; anything
@@ -404,10 +416,11 @@ Adds the timestamps the model produced, in the OpenAI `verbose_json` shape:
   from the duration the container advertises.
 - `segments` is always present. Models that report no segment rows of their
   own get one segment per chunk instead, spanning that chunk.
-- `words` is present only when the model produced word rows. Which
-  granularity a model produces is family-specific: GigaAM aligns down to
-  40 ms, whisper models report segments only. The server asks for the finest
-  granularity the loaded model advertises and passes on whatever comes back.
+- `words` is present only when the model produced word rows. GigaAM produces
+  token rows at 40 ms, not words; they are not mapped into `words` because a
+  token is a subword or character, not a word. Whisper models report segments
+  only. The server asks for the finest granularity the loaded model advertises
+  and passes on whatever comes back.
 - Per-token confidence is available from the library but is not exposed:
   the OpenAI shape has no field for it.
 
