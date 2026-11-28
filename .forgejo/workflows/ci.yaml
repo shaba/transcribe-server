@@ -33,9 +33,11 @@ jobs:
           key: cargo-test-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-test-
-      - run: cargo fmt --check
+      - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      - run: cargo clippy -p transcribe-decoder --all-targets -- -D warnings
+      - run: cargo test -p transcribe-decoder
       - run: cargo check --no-default-features
       - run: cargo check --no-default-features --features lazy-ffmpeg
 

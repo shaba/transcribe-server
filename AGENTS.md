@@ -34,9 +34,11 @@ devel packages required), `engine-transcribe` (off by default).
 ## Pre-commit gates (all must pass before EVERY commit)
 
 ```sh
-cargo fmt --check
+cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+cargo clippy -p transcribe-decoder --all-targets -- -D warnings
+cargo test -p transcribe-decoder
 ```
 
 Never suppress or skip a failing test to make a commit pass. Analyze first;

@@ -1,6 +1,5 @@
 [workspace]
 members = ["decoder"]
-default-members = [".", "decoder"]
 resolver = "3"
 
 [package]
@@ -25,7 +24,6 @@ libloading = { version = "0.8.9", optional = true }
 hound = "3.5.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-tempfile = "3.27.0"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["full"] }
 tracing = "0.1.44"
@@ -41,6 +39,7 @@ tower = { version = "0.5.3", features = ["limit"] }
 
 [dev-dependencies]
 futures-util = "0.3.34"
+tempfile = "3.27.0"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "multipart", "stream", "rustls"] }
 tokio-tungstenite = "0.30.0"
 tower = { version = "0.5.3", features = ["util"] }
