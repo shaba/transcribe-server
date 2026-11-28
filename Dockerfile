@@ -13,10 +13,12 @@ RUN TRANSCRIBE_CMAKE_ARGS="-DTRANSCRIBE_X86_CONSERVATIVE=ON -DGGML_NATIVE=OFF" \
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libavcodec59 libavformat59 libavutil57 libswresample4 libstdc++6 \
+        libavcodec59 libavformat59 libavutil57 libswresample4 libstdc++6 curl \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/transcribe-server /usr/local/bin/
 USER 65532:65532
 ENV TRANSCRIBE_HOST=0.0.0.0
 EXPOSE 8010
+HEALTHCHECK --interval=30s --timeout=3s --start-period=60s \
+    CMD curl -fsS http://127.0.0.1:8010/health || exit 1
 ENTRYPOINT ["/usr/local/bin/transcribe-server"]
