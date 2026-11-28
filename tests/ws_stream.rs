@@ -63,6 +63,17 @@ async fn recv_json(ws: &mut WsStream) -> serde_json::Value {
     }
 }
 
+/// Next non-volatile frame: test assertions about partial/final must not be
+/// confused by tentative hypotheses that arrive between commits.
+async fn recv_event(ws: &mut WsStream) -> serde_json::Value {
+    loop {
+        let frame = recv_json(ws).await;
+        if frame["type"] != "tentative" {
+            return frame;
+        }
+    }
+}
+
 /// After the server closes, the client sees a Close frame and then None.
 async fn assert_server_closed(ws: &mut WsStream) {
     loop {
@@ -87,7 +98,7 @@ async fn start_frames_stop_yields_final_text() {
     }
     send_json(&mut ws, json!({"type": "stop"})).await;
 
-    let final_msg = recv_json(&mut ws).await;
+    let final_msg = recv_event(&mut ws).await;
     assert_eq!(final_msg["type"], "final");
     assert_eq!(final_msg["text"], "fake:default:16000");
     assert_server_closed(&mut ws).await;
@@ -156,6 +167,54 @@ async fn partials_drain_per_chunk_and_final_joins_all() {
     let final_msg = recv_json(&mut ws).await;
     assert_eq!(final_msg["type"], "final");
     assert_eq!(final_msg["text"], "fake:m1:8000 fake:m1:8000");
+    assert_server_closed(&mut ws).await;
+}
+
+/// A short hop emits a volatile hypothesis before the window fills; the
+/// commit frame then carries the same text as its committed prefix.
+#[tokio::test]
+async fn tentative_then_commit_without_duplicating_text() {
+    let cfg = Arc::new(
+        Config::try_parse_from([
+            "ts",
+            "--parallel",
+            "2",
+            "--chunk-max-sec",
+            "2",
+            "--stream-window-sec",
+            "1",
+            "--stream-hop-sec",
+            "0.5",
+        ])
+        .expect("parse config"),
+    );
+    let base = spawn_app_with_cfg(Arc::new(FakeEngine), auth_keys(&[]), cfg).await;
+    let mut ws = connect_ws(&base, None).await;
+
+    send_json(&mut ws, json!({"type": "start"})).await;
+    ws.send(Message::Binary(sine_frame(8000).into()))
+        .await
+        .expect("send binary");
+    let tentative = recv_json(&mut ws).await;
+    assert_eq!(tentative["type"], "tentative");
+    assert_eq!(tentative["text"], "fake:default:8000");
+    assert_eq!(tentative["committed"], "");
+    assert_eq!(tentative["tentative"], "fake:default:8000");
+
+    ws.send(Message::Binary(sine_frame(8000).into()))
+        .await
+        .expect("send binary");
+    let partial = recv_json(&mut ws).await;
+    assert_eq!(partial["type"], "partial");
+    assert_eq!(partial["text"], "fake:default:16000");
+    assert_eq!(partial["committed"], "fake:default:16000");
+    assert_eq!(partial["tentative"], "");
+
+    send_json(&mut ws, json!({"type": "stop"})).await;
+    let final_msg = recv_event(&mut ws).await;
+    assert_eq!(final_msg["type"], "final");
+    assert_eq!(final_msg["text"], "fake:default:16000");
+    assert_eq!(final_msg["committed"], "fake:default:16000");
     assert_server_closed(&mut ws).await;
 }
 

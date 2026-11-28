@@ -221,6 +221,8 @@ Every flag can also be set through its environment variable (flag wins).
 | `--api-key-file` | `TRANSCRIBE_API_KEY_FILE` | (none) | File with API keys, one per line |
 | `--language` | `TRANSCRIBE_LANGUAGE` | auto-detect | Default transcription language |
 | `--chunk-max-sec` | `TRANSCRIBE_CHUNK_MAX_SEC` | `25` | Max chunk length in seconds for long-form audio (lowered to the model's own limit when it reports a shorter one) |
+| `--stream-window-sec` | `TRANSCRIBE_STREAM_WINDOW_SEC` | `5` | Commit window in seconds for WebSocket streaming; capped by `--chunk-max-sec` |
+| `--stream-hop-sec` | `TRANSCRIBE_STREAM_HOP_SEC` | `1` | Interval between tentative WebSocket hypotheses |
 | `--vad-threshold` | `TRANSCRIBE_VAD_THRESHOLD` | `0.01` | Energy VAD threshold for chunk splitting |
 | `--max-upload-mb` | `TRANSCRIBE_MAX_UPLOAD_MB` | `256` | Max upload size in megabytes ([why 256](#upload-size-and-memory)) |
 | `--pnc` | `TRANSCRIBE_PNC` | model default | Punctuation and capitalization: `on` or `off` |
@@ -512,9 +514,10 @@ Streaming transcription over WebSocket. Control frames are JSON text:
 client -> {"type":"start","model":"<alias>"?,"language":"ru"?,"pnc":true?,"itn":false?}
 client -> binary PCM16LE mono 16 kHz frames (any framing)
 client -> {"type":"stop"}
-server -> {"type":"partial","text":"..."}   per drained chunk
-server -> {"type":"final","text":"..."}     on stop, then server closes
-server -> {"type":"error","message":"..."}  on any error, then closes
+server -> {"type":"tentative","text":"...","committed":"...","tentative":"..."}  per hop
+server -> {"type":"partial","text":"...","committed":"...","tentative":""}      per drained chunk
+server -> {"type":"final","text":"...","committed":"...","tentative":""}        on stop, then closes
+server -> {"type":"error","message":"..."}                                      on any error, then closes
 ```
 
 `pnc` and `itn` are booleans here (the JSON frame has no reason to spell them
@@ -522,12 +525,25 @@ as words) and mean exactly what the `pnc`/`itn` multipart fields mean above,
 including the fall back to `--pnc`/`--itn`.
 
 Binary frames are only valid after `start` and must contain a whole number of
-PCM16LE samples: a dangling odd byte is a protocol error. Partials are
-emitted whenever a full chunk window is buffered, cut at a VAD-detected
-silence when there is one; the window is `--chunk-max-sec`, or the model's own
-maximum when that is shorter, exactly as for uploads. The final text is every partial
-text plus the remainder joined with a single space (empty chunk transcripts
-are skipped).
+PCM16LE samples: a dangling odd byte is a protocol error.
+
+Streaming commits in windows of `min(--chunk-max-sec, --stream-window-sec)`
+seconds, cut at a VAD-detected silence when there is one (otherwise at the
+window edge). A `partial` frame is a committed chunk: its `text` is that
+chunk's transcript, so a client that appends `partial.text` keeps the old
+behaviour. `committed` is the frozen prefix for the whole session and
+`tentative` is empty there.
+
+Between commits, at most once per `--stream-hop-sec`, the server re-decodes
+only the uncommitted tail and sends a `tentative` frame. Its `text` and
+`tentative` are the volatile hypothesis, while `committed` is unchanged. This
+is not a full re-decode of the session: the tail is bounded by the commit
+window, so the cost per hop stays constant. A client that wants a flicker-free
+display renders `committed + tentative` and ignores `tentative` frames if it
+only knows the old protocol.
+
+On `stop`, the remainder is committed and `final.text` is `committed +` that
+remainder, joined with a single space (empty chunk transcripts are skipped).
 
 ### GET /v1/models
 

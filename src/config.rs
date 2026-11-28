@@ -58,6 +58,24 @@ pub struct Config {
     )]
     pub chunk_max_sec: f32,
 
+    /// Commit window in seconds for WebSocket streaming; capped by --chunk-max-sec
+    #[arg(
+        long,
+        default_value_t = 5.0,
+        env = "TRANSCRIBE_STREAM_WINDOW_SEC",
+        value_parser = positive_f32
+    )]
+    pub stream_window_sec: f32,
+
+    /// Interval in seconds between tentative WebSocket hypotheses
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        env = "TRANSCRIBE_STREAM_HOP_SEC",
+        value_parser = positive_f32
+    )]
+    pub stream_hop_sec: f32,
+
     /// Energy VAD threshold for chunk splitting
     #[arg(long, default_value_t = 0.01, env = "TRANSCRIBE_VAD_THRESHOLD")]
     pub vad_threshold: f32,

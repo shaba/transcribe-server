@@ -251,8 +251,17 @@ async fn worker_wakes_serves_requests_and_unloads() {
     ws.send(Message::Text(r#"{"type":"stop"}"#.into()))
         .await
         .unwrap();
-    let frame = timeout(WAIT, ws.next()).await.unwrap().unwrap().unwrap();
-    let final_msg: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+    let final_msg = timeout(WAIT, async {
+        loop {
+            let frame = ws.next().await.unwrap().unwrap();
+            let value: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            if value["type"] != "tentative" {
+                return value;
+            }
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(final_msg["type"], "final");
     assert_eq!(final_msg["text"], "fake:default:16000");
     drop(ws);

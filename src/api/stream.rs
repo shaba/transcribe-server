@@ -101,11 +101,20 @@ async fn run_session(socket: &mut WebSocket, state: &AppState) -> SessionEnd {
         pnc: start.pnc.or(state.cfg.pnc),
         itn: start.itn.or(state.cfg.itn),
     });
-    let chunk_max_sec = state.chunk_max_sec(options.model.as_deref());
-    let max_samples = window_samples(chunk_max_sec);
+    // The commit window is the operator's chunk length capped by the
+    // streaming window: long-form models still get bounded re-decodes, and a
+    // short --chunk-max-sec keeps its old per-chunk behaviour.
+    let window_sec = state
+        .chunk_max_sec(options.model.as_deref())
+        .min(state.cfg.stream_window_sec);
+    let window_len = window_samples(window_sec);
+    let hop_sec = state.cfg.stream_hop_sec.min(window_sec);
+    let hop_len = window_samples(hop_sec);
 
     let mut buffer: Vec<f32> = Vec::new();
-    let mut parts: Vec<String> = Vec::new();
+    let mut committed: Vec<String> = Vec::new();
+    // Samples already covered by the last tentative decode; reset on commit.
+    let mut last_preview = 0usize;
     loop {
         // A client that sends start and then vanishes keeps the engine lease
         // (and, on-demand, the loaded model) until TCP notices. Bound it.
@@ -131,20 +140,51 @@ async fn run_session(socket: &mut WebSocket, state: &AppState) -> SessionEnd {
                         .iter()
                         .map(|sample| f32::from(i16::from_le_bytes(*sample)) / 32768.0),
                 );
-                // Full window buffered: drain at the chunker's first cut
-                // (a silence near the window end when there is one).
-                while buffer.len() >= max_samples {
-                    let cut = first_cut(&buffer, chunk_max_sec, state.cfg.vad_threshold);
+                // Commit full windows first; a silence near the window end is
+                // preferred, otherwise the window edge cuts.
+                while buffer.len() >= window_len {
+                    let cut = first_cut(&buffer, window_sec, state.cfg.vad_threshold);
                     let chunk: Vec<f32> = buffer.drain(..cut).collect();
                     let text = match transcribe(state, chunk, &options).await {
                         Ok(text) => text,
                         Err(end) => return end,
                     };
-                    let frame = json!({"type": "partial", "text": text}).to_string();
+                    committed.push(text.clone());
+                    let display = committed_text(&committed);
+                    let frame = json!({
+                        "type": "partial",
+                        "text": text,
+                        "committed": display,
+                        "tentative": ""
+                    })
+                    .to_string();
                     if socket.send(Message::Text(frame.into())).await.is_err() {
                         return SessionEnd::Disconnected;
                     }
-                    parts.push(text);
+                    last_preview = 0;
+                }
+                // Re-decode only the uncommitted tail, at most once per hop.
+                // Re-encoding the whole buffer every hop would cost more than
+                // real time once the window is large.
+                if buffer.len() >= hop_len && buffer.len() - last_preview >= hop_len {
+                    let text = match transcribe(state, buffer.clone(), &options).await {
+                        Ok(text) => text,
+                        Err(end) => return end,
+                    };
+                    last_preview = buffer.len();
+                    if !text.trim().is_empty() {
+                        let display = committed_text(&committed);
+                        let frame = json!({
+                            "type": "tentative",
+                            "text": text.clone(),
+                            "committed": display,
+                            "tentative": text
+                        })
+                        .to_string();
+                        if socket.send(Message::Text(frame.into())).await.is_err() {
+                            return SessionEnd::Disconnected;
+                        }
+                    }
                 }
             }
             Message::Text(text) => match parse_command(&text) {
@@ -162,17 +202,27 @@ async fn run_session(socket: &mut WebSocket, state: &AppState) -> SessionEnd {
     if !buffer.is_empty() {
         let remainder = std::mem::take(&mut buffer);
         match transcribe(state, remainder, &options).await {
-            Ok(text) => parts.push(text),
+            Ok(text) => committed.push(text),
             Err(end) => return end,
         }
     }
-    let frame =
-        json!({"type": "final", "text": crate::api::join_parts(parts.iter().map(String::as_str))})
-            .to_string();
+    let final_text = committed_text(&committed);
+    let frame = json!({
+        "type": "final",
+        "text": final_text.clone(),
+        "committed": final_text,
+        "tentative": ""
+    })
+    .to_string();
     if socket.send(Message::Text(frame.into())).await.is_err() {
         return SessionEnd::Disconnected;
     }
     SessionEnd::Completed
+}
+
+/// The flicker-free committed prefix that tentative frames extend.
+fn committed_text(parts: &[String]) -> String {
+    crate::api::join_parts(parts.iter().map(String::as_str))
 }
 
 /// What the start frame asked for, before the server defaults are folded in.
